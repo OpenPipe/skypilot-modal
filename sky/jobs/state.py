@@ -107,6 +107,14 @@ spot_table = sqlalchemy.Table(
     sqlalchemy.Column('is_primary_in_job_group',
                       sqlalchemy.Boolean,
                       server_default=None),
+    # Optional plugin-provided override for the user-facing status. The core
+    # state machine never reads this column; it always uses `status`. Read
+    # paths (status counts, status filter, returned status) may surface this
+    # value instead of `status` via the optional `status_expr` seam, so a
+    # plugin can present a refined status (e.g. show a still-launching job as
+    # PENDING while it waits in an external scheduler queue) without altering
+    # the underlying job lifecycle. NULL means "no override".
+    sqlalchemy.Column('status_override', sqlalchemy.Text, server_default=None),
 )
 
 job_info_table = sqlalchemy.Table(
@@ -1503,8 +1511,15 @@ def build_managed_jobs_with_filters_no_status_query(
     count_only: bool = False,
     count_unique_jobs: bool = False,
     status_count: bool = False,
+    status_expr: Optional['sqlalchemy.ColumnElement'] = None,
 ) -> sqlalchemy.Select:
     """Build a query to get managed jobs from the database with filters.
+
+    status_expr is an optional SQLAlchemy expression used in place of the raw
+    ``spot.status`` column whenever a user-facing status is needed (the
+    status-count grouping column). It lets a caller surface a refined status
+    (e.g. a plugin override) without changing the underlying column. When None,
+    the raw ``spot.status`` column is used.
 
     submitted_after / submitted_before are epoch seconds (matching the
     ``submitted_at`` column) and restrict the result to jobs submitted within
@@ -1529,7 +1544,9 @@ def build_managed_jobs_with_filters_no_status_query(
     elif count_only:
         query = sqlalchemy.select(sqlalchemy.func.count().label('count'))  # pylint: disable=not-callable
     elif status_count:
-        query = sqlalchemy.select(spot_table.c.status,
+        status_col = (status_expr
+                      if status_expr is not None else spot_table.c.status)
+        query = sqlalchemy.select(status_col.label('status'),
                                   sqlalchemy.func.count().label('count'))  # pylint: disable=not-callable
     else:
         query = sqlalchemy.select(
@@ -1617,8 +1634,14 @@ def build_managed_jobs_with_filters_query(
     submitted_before: Optional[float] = None,
     count_only: bool = False,
     count_unique_jobs: bool = False,
+    status_expr: Optional['sqlalchemy.ColumnElement'] = None,
 ) -> sqlalchemy.Select:
-    """Build a query to get managed jobs from the database with filters."""
+    """Build a query to get managed jobs from the database with filters.
+
+    See build_managed_jobs_with_filters_no_status_query for the meaning of
+    status_expr; here it is also used to match the ``statuses`` filter against
+    the refined status instead of the raw ``spot.status`` column.
+    """
     query = build_managed_jobs_with_filters_no_status_query(
         fields=fields,
         job_ids=job_ids,
@@ -1632,9 +1655,12 @@ def build_managed_jobs_with_filters_query(
         submitted_before=submitted_before,
         count_only=count_only,
         count_unique_jobs=count_unique_jobs,
+        status_expr=status_expr,
     )
     if statuses is not None:
-        query = query.where(spot_table.c.status.in_(statuses))
+        status_col = (status_expr
+                      if status_expr is not None else spot_table.c.status)
+        query = query.where(status_col.in_(statuses))
     return query
 
 
@@ -1649,8 +1675,13 @@ def get_status_count_with_filters(
     skip_finished: bool = False,
     submitted_after: Optional[float] = None,
     submitted_before: Optional[float] = None,
+    status_expr: Optional['sqlalchemy.ColumnElement'] = None,
 ) -> Dict[str, int]:
-    """Get the status count of the managed jobs with filters."""
+    """Get the status count of the managed jobs with filters.
+
+    status_expr, when provided, replaces the raw ``spot.status`` column as the
+    grouping key, so counts are bucketed by the refined user-facing status.
+    """
     query = build_managed_jobs_with_filters_no_status_query(
         fields=fields,
         job_ids=job_ids,
@@ -1663,8 +1694,11 @@ def get_status_count_with_filters(
         submitted_after=submitted_after,
         submitted_before=submitted_before,
         status_count=True,
+        status_expr=status_expr,
     )
-    query = query.group_by(spot_table.c.status)
+    status_col = (status_expr
+                  if status_expr is not None else spot_table.c.status)
+    query = query.group_by(status_col)
     results: Dict[str, int] = {}
     engine = _db_manager.get_engine()
     with orm.Session(engine) as session:
@@ -1751,8 +1785,15 @@ def get_managed_jobs_with_filters(
     limit: Optional[int] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
+    status_expr: Optional['sqlalchemy.ColumnElement'] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Get managed jobs from the database with filters.
+
+    status_expr, when provided, is used to match the ``statuses`` filter
+    against a refined user-facing status instead of the raw ``spot.status``
+    column (see build_managed_jobs_with_filters_no_status_query). The returned
+    rows still carry the raw ``status``; callers that want the refined value in
+    the result should surface it separately.
 
     Pagination is by unique jobs (spot_job_id), not by tasks. This means
     if you request page 1 with limit 10, you get all tasks for 10 unique jobs.
@@ -1776,7 +1817,10 @@ def get_managed_jobs_with_filters(
         'job_name': spot_table.c.job_name,
         'name': spot_table.c.job_name,
         'submitted_at': spot_table.c.submitted_at,
-        'status': spot_table.c.status,
+        # Sort by the refined status (status_expr) when provided, so the order
+        # matches the displayed/grouped status instead of the raw column.
+        'status':
+            (status_expr if status_expr is not None else spot_table.c.status),
         'job_duration': spot_table.c.job_duration,
         'duration': spot_table.c.job_duration,
         'recovery_count': spot_table.c.recovery_count,
@@ -1804,6 +1848,7 @@ def get_managed_jobs_with_filters(
         submitted_after=submitted_after,
         submitted_before=submitted_before,
         count_unique_jobs=True,
+        status_expr=status_expr,
     )
     with orm.Session(engine) as session:
         total = session.execute(count_query).fetchone()[0]
@@ -1827,6 +1872,7 @@ def get_managed_jobs_with_filters(
             skip_finished=skip_finished,
             submitted_after=submitted_after,
             submitted_before=submitted_before,
+            status_expr=status_expr,
         ).with_only_columns(spot_table.c.spot_job_id).group_by(
             spot_table.c.spot_job_id)
 
@@ -1869,6 +1915,7 @@ def get_managed_jobs_with_filters(
             user_hashes=user_hashes,
             statuses=statuses,
             skip_finished=skip_finished,
+            status_expr=status_expr,
         )
     else:
         # No pagination - get all jobs
@@ -1884,6 +1931,7 @@ def get_managed_jobs_with_filters(
             skip_finished=skip_finished,
             submitted_after=submitted_after,
             submitted_before=submitted_before,
+            status_expr=status_expr,
         )
 
     # Apply sorting
@@ -3339,8 +3387,11 @@ def get_task_logs_to_clean(retention_seconds: int,
                 )).
             where(
                 sqlalchemy.and_(
-                    job_info_table.c.schedule_state.is_(
-                        ManagedJobScheduleState.DONE.value),
+                    # Use ==, not .is_(): on PostgreSQL `IS <string>` is a
+                    # syntax error (IS only accepts NULL/TRUE/FALSE), which
+                    # would make the whole GC query raise on every run.
+                    job_info_table.c.schedule_state ==
+                    ManagedJobScheduleState.DONE.value,
                     spot_table.c.end_at.isnot(None),
                     spot_table.c.end_at < (now - retention_seconds),
                     spot_table.c.logs_cleaned_at.is_(None),
@@ -3363,7 +3414,18 @@ def get_controller_logs_to_clean(retention_seconds: int,
 
     The controller logs will only cleaned when:
     - the job schedule state is DONE
-    - AND the end time of the latest task is older than the retention period
+    - AND either the end time of the latest task is older than the retention
+      period, or the job has no end time at all (it was cancelled before it
+      ever ran, so there is no log to retain)
+
+    Unlike task logs, controller logs do not require local_log_file to be set.
+    A controller log file is written for every job the controller processes
+    (during provisioning, recovery, etc.), regardless of whether the task ever
+    produced a downloaded log. Gating on local_log_file would leave controller
+    logs of jobs that terminate without a downloaded task log -- e.g. those that
+    end as FAILED_CONTROLLER on a controller crash, or are cancelled before the
+    task starts -- uncleaned forever. The DONE schedule state plus a finished
+    end_at is sufficient to know the controller has exited and its log is final.
     """
     engine = _db_manager.get_engine()
     with orm.Session(engine) as session:
@@ -3375,18 +3437,24 @@ def get_controller_logs_to_clean(retention_seconds: int,
                     job_info_table.c.spot_job_id == spot_table.c.spot_job_id,
                 )).where(
                     sqlalchemy.and_(
-                        job_info_table.c.schedule_state.is_(
-                            ManagedJobScheduleState.DONE.value),
-                        spot_table.c.local_log_file.isnot(None),
+                        job_info_table.c.schedule_state ==
+                        ManagedJobScheduleState.DONE.value,
                         job_info_table.c.controller_logs_cleaned_at.is_(None),
                     )).group_by(
                         job_info_table.c.spot_job_id,
                         job_info_table.c.current_cluster_name,
-                    ).having(
-                        sqlalchemy.func.max(
-                            spot_table.c.end_at).isnot(None),).having(
-                                sqlalchemy.func.max(spot_table.c.end_at) < (
-                                    now - retention_seconds)).limit(batch_size))
+                    ).
+            having(
+                # A job cancelled while still PENDING (via
+                # set_pending_cancelled) reaches DONE with end_at never
+                # set. It never ran, so it has no controller log to
+                # retain -- clean it immediately. Filtering it out here
+                # instead would leave it forever uncleaned and re-scanned
+                # by the group-by on every GC cycle.
+                sqlalchemy.or_(
+                    sqlalchemy.func.max(spot_table.c.end_at).is_(None),
+                    sqlalchemy.func.max(spot_table.c.end_at) <
+                    (now - retention_seconds))).limit(batch_size))
         rows = result.fetchall()
         return [{'job_id': row[0]} for row in rows]
 
