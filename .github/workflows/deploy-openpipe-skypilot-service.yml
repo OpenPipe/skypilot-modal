@@ -16,22 +16,33 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     steps:
-      - name: Check dispatch token
-        id: token
+      - name: Check dispatch app credentials
+        id: app-credentials
         env:
-          DISPATCH_TOKEN: ${{ secrets.SKYPILOT_SERVICE_DISPATCH_TOKEN }}
+          APP_ID: ${{ secrets.SKYPILOT_SERVICE_DISPATCH_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.SKYPILOT_SERVICE_DISPATCH_APP_PRIVATE_KEY }}
         run: |
-          if [[ -z "${DISPATCH_TOKEN}" ]]; then
-            echo "::warning::SKYPILOT_SERVICE_DISPATCH_TOKEN is not set; skipping skypilot-service deploy dispatch."
-            echo "has_token=false" >> "${GITHUB_OUTPUT}"
+          if [[ -z "${APP_ID}" || -z "${APP_PRIVATE_KEY}" ]]; then
+            echo "::warning::SKYPILOT_SERVICE_DISPATCH_APP_ID or SKYPILOT_SERVICE_DISPATCH_APP_PRIVATE_KEY is not set; skipping skypilot-service deploy dispatch."
+            echo "has_app_credentials=false" >> "${GITHUB_OUTPUT}"
           else
-            echo "has_token=true" >> "${GITHUB_OUTPUT}"
+            echo "has_app_credentials=true" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Mint skypilot-service dispatch token
+        id: app-token
+        if: ${{ steps.app-credentials.outputs.has_app_credentials == 'true' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SKYPILOT_SERVICE_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.SKYPILOT_SERVICE_DISPATCH_APP_PRIVATE_KEY }}
+          owner: OpenPipe
+          repositories: skypilot-service
+
       - name: Dispatch skypilot-service deploy
-        if: ${{ steps.token.outputs.has_token == 'true' }}
+        if: ${{ steps.app-credentials.outputs.has_app_credentials == 'true' }}
         env:
-          DISPATCH_TOKEN: ${{ secrets.SKYPILOT_SERVICE_DISPATCH_TOKEN }}
+          DISPATCH_TOKEN: ${{ steps.app-token.outputs.token }}
           SKYPILOT_REF: ${{ github.sha }}
           SKYPILOT_SERVICE_REPO: OpenPipe/skypilot-service
         run: |
