@@ -123,6 +123,107 @@ def test_merge_k8s_configs_with_init_container_resources():
     assert container['image'] == 'override-image:latest'
 
 
+def test_merge_k8s_configs_intersects_gpu_affinity_and_node_name():
+    gpu = {'key': 'gpu.nvidia.com/class', 'operator': 'In', 'values': ['H200']}
+    node = {
+        'key': 'metadata.name',
+        'operator': 'In',
+        'values': ['selected-node']
+    }
+    base = {'nodeSelectorTerms': [{'matchExpressions': [gpu]}]}
+    override = {'nodeSelectorTerms': [{'matchFields': [node]}]}
+    original = copy.deepcopy(override)
+
+    config_utils.merge_k8s_configs(base, override)
+
+    # One AND term excludes both other H200 nodes and selected non-H200 nodes.
+    assert base == {
+        'nodeSelectorTerms': [{
+            'matchExpressions': [gpu],
+            'matchFields': [node]
+        }]
+    }
+    assert override == original
+
+
+def test_merge_k8s_configs_preserves_affinity_or_alternatives():
+    base = {
+        'nodeSelectorTerms': [{
+            'matchExpressions': [{
+                'key': 'gpu',
+                'operator': 'In',
+                'values': [gpu]
+            }]
+        } for gpu in ('H200', 'H100')]
+    }
+    override = {
+        'nodeSelectorTerms': [{
+            'matchExpressions': [{
+                'key': 'pool',
+                'operator': 'In',
+                'values': [pool]
+            }]
+        } for pool in ('a', 'b')]
+    }
+
+    config_utils.merge_k8s_configs(base, override)
+
+    terms = base['nodeSelectorTerms']
+    assert len(terms) == 4
+    assert all(len(term['matchExpressions']) == 2 for term in terms)
+    assert {
+        tuple(requirement['values'][0]
+              for requirement in term['matchExpressions'])
+        for term in terms
+    } == {('H200', 'a'), ('H200', 'b'), ('H100', 'a'), ('H100', 'b')}
+
+
+@pytest.mark.parametrize('null_field', ['matchExpressions', 'matchFields'])
+def test_merge_k8s_configs_null_requirement_does_not_drop_constraint(
+        null_field):
+    requirements = {
+        'matchExpressions': [{
+            'key': 'gpu',
+            'operator': 'In',
+            'values': ['H200']
+        }],
+        'matchFields': [{
+            'key': 'metadata.name',
+            'operator': 'In',
+            'values': ['selected-node']
+        }]
+    }
+    base = {'nodeSelectorTerms': [{null_field: requirements[null_field]}]}
+    override_term = {**requirements, null_field: None}
+
+    config_utils.merge_k8s_configs(base, {'nodeSelectorTerms': [override_term]})
+
+    assert base == {'nodeSelectorTerms': [requirements]}
+
+
+@pytest.mark.parametrize('empty', [[], [None], [{}], [{
+    'matchExpressions': []
+}], [{
+    'matchFields': []
+}]])
+@pytest.mark.parametrize('empty_base', [False, True])
+def test_merge_k8s_configs_empty_node_selector_matches_nothing(
+        empty, empty_base):
+    constrained = [{
+        'matchFields': [{
+            'key': 'metadata.name',
+            'operator': 'In',
+            'values': ['selected-node']
+        }]
+    }]
+    base = {'nodeSelectorTerms': empty if empty_base else constrained}
+    override = {'nodeSelectorTerms': constrained if empty_base else empty}
+
+    config_utils.merge_k8s_configs(base, override)
+
+    assert base['nodeSelectorTerms'] == [{}]
+
+
 def test_merge_k8s_configs_with_deeper_override():
     base_config = {
         'containers': [{
