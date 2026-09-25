@@ -3,6 +3,7 @@
 import dataclasses
 import enum
 import functools
+from http import HTTPStatus
 from http.cookiejar import CookieJar
 from http.cookiejar import MozillaCookieJar
 import ipaddress
@@ -605,10 +606,13 @@ def _handle_non_200_server_status(
                                      error=body.get('message', ''))
         except requests.JSONDecodeError:
             pass
-    detail = response.reason
+    try:
+        detail = HTTPStatus(response.status_code).phrase
+    except ValueError:
+        detail = None
     try:
         body_detail = response.json().get('detail')
-        if isinstance(body_detail, str):
+        if body_detail == 'oauth2-proxy service unavailable':
             detail = body_detail
     except (requests.JSONDecodeError, AttributeError):
         pass
@@ -1133,10 +1137,10 @@ def check_server_healthy_or_start_fn(deploy: bool = False,
         if api_server_status == ApiServerStatus.NEEDS_AUTH:
             with ux_utils.print_exception_no_traceback():
                 raise exceptions.ApiServerAuthenticationError(endpoint)
-    except exceptions.ApiServerConnectionError as exc:
+    except exceptions.ApiServerConnectionError:
         if not is_api_server_local(endpoint):
             with ux_utils.print_exception_no_traceback():
-                raise exceptions.ApiServerConnectionError(endpoint) from exc
+                raise
         # Fail early (before taking the creation lock) if silently starting
         # a local API server is disabled on this machine.
         check_local_api_server_enabled_or_raise()

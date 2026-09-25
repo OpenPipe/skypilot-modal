@@ -290,6 +290,7 @@ class TestOriginalOAuth2ProxyMiddleware:
             assert response.status_code == http.HTTPStatus.BAD_GATEWAY
             assert ('oauth2-proxy service unavailable'
                     in response.body.decode())
+            mock_session.request.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_authenticate_retries_connector_failures_under_churn(
@@ -321,20 +322,25 @@ class TestOriginalOAuth2ProxyMiddleware:
     @pytest.mark.asyncio
     async def test_authenticate_fails_closed_after_connector_retry(
             self, middleware_enabled, mock_request):
+        mock_request.state.auth_user = None
+        call_next = mock.AsyncMock()
         connection_key = mock.Mock(host='oauth2-proxy', port=4180, ssl=False)
         connector_error = aiohttp.ClientConnectorError(
             connection_key, OSError(9, 'Bad file descriptor'))
         failed_context = mock.AsyncMock()
         failed_context.__aenter__.side_effect = connector_error
-        session = mock.Mock()
-        session.request.return_value = failed_context
+        with mock.patch('aiohttp.ClientSession') as session_class:
+            session = mock.Mock()
+            session.request.return_value = failed_context
+            session_class.return_value.__aenter__.return_value = session
 
-        with pytest.raises(aiohttp.ClientConnectorError):
-            async with middleware_enabled._auth_response_with_retry(
-                    mock_request, session,
-                    'http://oauth2-proxy:4180/oauth2/auth', {}):
-                pass
+            response = await middleware_enabled.authenticate(
+                mock_request, call_next)
+
+        assert response.status_code == http.HTTPStatus.BAD_GATEWAY
+        assert 'oauth2-proxy service unavailable' in response.body.decode()
         assert session.request.call_count == 2
+        call_next.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_authenticate_does_not_retry_downstream_connector_failure(

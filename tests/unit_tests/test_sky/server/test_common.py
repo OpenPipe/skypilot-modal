@@ -86,6 +86,28 @@ def test_unhealthy_server_reports_health_status(mock_get_status):
             'unavailable'):
         common.check_server_healthy('https://api.example.com')
 
+    response.json.return_value = {'detail': 'Bearer secret\nsecond line'}
+    assert common._handle_non_200_server_status(response).error == (
+        'HTTP 502: Bad Gateway')
+
+
+@mock.patch('sky.server.common.is_api_server_local', return_value=False)
+@mock.patch('sky.server.common.get_server_url',
+            return_value='https://api.example.com')
+@mock.patch('sky.server.common.get_api_server_status')
+def test_remote_server_wrapper_retains_health_status(mock_get_status,
+                                                     unused_mock_server_url,
+                                                     unused_mock_is_local):
+    mock_get_status.return_value = ApiServerInfo(
+        status=ApiServerStatus.UNHEALTHY,
+        error='HTTP 502: oauth2-proxy service unavailable')
+
+    with pytest.raises(
+            exceptions.ApiServerConnectionError,
+            match='last health check: HTTP 502: oauth2-proxy service '
+            'unavailable'):
+        common.check_server_healthy_or_start_fn()
+
 
 @mock.patch('sky.server.common._start_api_server')
 @mock.patch('sky.server.common.set_api_cookie_jar')

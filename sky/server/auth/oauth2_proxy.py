@@ -243,12 +243,13 @@ class OAuth2ProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                         timeout=aiohttp.ClientTimeout(total=10),
                         allow_redirects=False,
                     ))
-            except aiohttp.ClientConnectorError:
+            except aiohttp.ClientConnectorError as error:
                 await stack.aclose()
                 if attempt + 1 == _AUTH_CONNECT_ATTEMPTS:
                     raise
-                logger.warning('Retrying OAuth2 proxy authentication after '
-                               'a connection failure')
+                logger.warning(
+                    'Retrying OAuth2 proxy authentication after '
+                    'a connection failure: %s', error)
                 await asyncio.sleep(_AUTH_CONNECT_RETRY_DELAY_SECONDS)
                 continue
             try:
