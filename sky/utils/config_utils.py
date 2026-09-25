@@ -361,6 +361,8 @@ def merge_k8s_configs(
 
     Updates nested dictionaries instead of replacing them.
     If a list is encountered, it will be appended to the base_config list.
+    Required node selector terms are intersected instead, so adding a placement
+    constraint cannot weaken an existing accelerator or node constraint.
 
     For fields with Kubernetes patch merge strategy (containers, volumes, env,
     etc.), items are merged by their patch merge key (e.g., 'name' for
@@ -383,6 +385,28 @@ def merge_k8s_configs(
                               next_allowed_override_keys,
                               next_disallowed_override_keys)
         elif isinstance(value, list) and key in base_config:
+            if key == 'nodeSelectorTerms':
+                # K8s ORs terms but ANDs requirements within a term. Appending
+                # terms would allow either the generated GPU selector or the
+                # user's placement constraint. Distribute AND over both ORs.
+                terms = []
+                for base_term in base_config[key]:
+                    for override_term in value:
+                        # An empty NodeSelectorTerm matches no nodes.
+                        if not all(term and (term.get('matchExpressions') or
+                                             term.get('matchFields'))
+                                   for term in (base_term, override_term)):
+                            continue
+                        terms.append({
+                            field:
+                            copy.deepcopy((base_term.get(field) or []) +
+                                          (override_term.get(field) or []))
+                            for field in ('matchExpressions', 'matchFields')
+                            if base_term.get(field) or override_term.get(field)
+                        })
+                # K8s requires at least one term; {} is a valid no-match term.
+                base_config[key] = terms or [{}]
+                continue
             # For list fields with patch strategy "merge", we merge the list
             # by the patch merge key.
             if key in _PATCH_MERGE_KEYS:
