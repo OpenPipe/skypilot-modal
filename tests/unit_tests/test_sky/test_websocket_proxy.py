@@ -73,8 +73,8 @@ async def _test_peer_close_cancels_open_stdin(monkeypatch) -> None:
                                                    closed, lock),
                 websocket_proxy.websocket_to_stdout(socket, _Writer(), False,
                                                     None, closed, lock),
-                websocket_proxy.latency_monitor(socket, None, closed, lock),
             ),
+            (websocket_proxy.latency_monitor(socket, None, closed, lock),),
         ))
 
     await asyncio.wait_for(read_started.wait(), 1)
@@ -131,8 +131,8 @@ async def _test_stdin_eof_cancels_open_receive() -> None:
                                                    closed, lock),
                 websocket_proxy.websocket_to_stdout(socket, _Writer(), False,
                                                     None, closed, lock),
-                websocket_proxy.latency_monitor(socket, None, closed, lock),
             ),
+            (websocket_proxy.latency_monitor(socket, None, closed, lock),),
         ), 1)
 
     assert closed.is_set()
@@ -167,3 +167,62 @@ async def _test_caller_cancellation_reaps_proxy_tasks() -> None:
         pass
 
     assert all(event.is_set() for event in cancelled)
+
+
+def test_stream_error_before_close_signal_reaps_other_tasks() -> None:
+    asyncio.run(_test_stream_error_before_close_signal_reaps_other_tasks())
+
+
+async def _test_stream_error_before_close_signal_reaps_other_tasks() -> None:
+    other_cancelled = asyncio.Event()
+
+    async def _fail() -> None:
+        raise RuntimeError('stream failed')
+
+    async def _blocked() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            other_cancelled.set()
+            raise
+
+    await asyncio.wait_for(
+        websocket_proxy._run_until_proxy_closed(asyncio.Event(),
+                                                (_fail(), _blocked())), 1)
+
+    assert other_cancelled.is_set()
+
+
+def test_second_cancellation_waits_for_task_cleanup() -> None:
+    asyncio.run(_test_second_cancellation_waits_for_task_cleanup())
+
+
+async def _test_second_cancellation_waits_for_task_cleanup() -> None:
+    cleanup_started = [asyncio.Event(), asyncio.Event()]
+    cleanup_release = asyncio.Event()
+    cleanup_finished = [asyncio.Event(), asyncio.Event()]
+
+    async def _blocked(index: int) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started[index].set()
+            await cleanup_release.wait()
+            cleanup_finished[index].set()
+
+    proxy = asyncio.create_task(
+        websocket_proxy._run_until_proxy_closed(asyncio.Event(),
+                                                (_blocked(0), _blocked(1))))
+    await asyncio.sleep(0)
+    proxy.cancel()
+    await asyncio.wait_for(
+        asyncio.gather(*(event.wait() for event in cleanup_started)), 1)
+    proxy.cancel()
+    cleanup_release.set()
+
+    try:
+        await asyncio.wait_for(proxy, 1)
+    except asyncio.CancelledError:
+        pass
+
+    assert all(event.is_set() for event in cleanup_finished)
