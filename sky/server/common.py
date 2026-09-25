@@ -605,7 +605,17 @@ def _handle_non_200_server_status(
                                      error=body.get('message', ''))
         except requests.JSONDecodeError:
             pass
-    return ApiServerInfo(status=ApiServerStatus.UNHEALTHY)
+    detail = response.reason
+    try:
+        body_detail = response.json().get('detail')
+        if isinstance(body_detail, str):
+            detail = body_detail
+    except (requests.JSONDecodeError, AttributeError):
+        pass
+    error = f'HTTP {response.status_code}'
+    if detail:
+        error += f': {detail[:200]}'
+    return ApiServerInfo(status=ApiServerStatus.UNHEALTHY, error=error)
 
 
 @cachetools.cached(cache=cachetools.TTLCache(maxsize=10,
@@ -1061,7 +1071,8 @@ def check_server_healthy(
             raise exceptions.APIVersionMismatchError(msg)
     elif api_server_status == ApiServerStatus.UNHEALTHY:
         with ux_utils.print_exception_no_traceback():
-            raise exceptions.ApiServerConnectionError(endpoint)
+            raise exceptions.ApiServerConnectionError(
+                endpoint, reason=api_server_info.error)
 
     # If the user ran pip upgrade, but the server wasn't restarted, warn them.
     # We check this using the info from /api/health, rather than in the

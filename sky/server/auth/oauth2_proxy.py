@@ -1,11 +1,12 @@
 """Authentication based on oauth2-proxy."""
 
 import asyncio
+import contextlib
 import hashlib
 import http
 import os
 import traceback
-from typing import Optional
+from typing import AsyncIterator, Mapping, Optional
 import urllib
 
 import aiohttp
@@ -34,6 +35,9 @@ HOP_BY_HOP_HEADERS = frozenset({
     'transfer-encoding',
     'upgrade',
 })
+
+_AUTH_CONNECT_ATTEMPTS = 2
+_AUTH_CONNECT_RETRY_DELAY_SECONDS = 0.1
 
 
 @middleware_utils.websocket_aware
@@ -145,14 +149,8 @@ class OAuth2ProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
         logger.debug(f'authenticate request: {auth_url}, '
                      f'headers: {forwarded_headers}')
 
-        async with session.request(
-                method='GET',
-                url=auth_url,
-                headers=forwarded_headers,
-                cookies=request.cookies,
-                timeout=aiohttp.ClientTimeout(total=10),
-                allow_redirects=False,
-        ) as auth_response:
+        async with self._auth_response_with_retry(
+                request, session, auth_url, forwarded_headers) as auth_response:
 
             if auth_response.status == http.HTTPStatus.ACCEPTED:
                 # User is authenticated, extract user info from headers
@@ -226,6 +224,39 @@ class OAuth2ProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                 return fastapi.responses.JSONResponse(
                     status_code=auth_response.status,
                     content={'detail': 'oauth2-proxy error'})
+
+    @contextlib.asynccontextmanager
+    async def _auth_response_with_retry(
+        self, request: fastapi.Request, session: aiohttp.ClientSession,
+        auth_url: str, forwarded_headers: Mapping[str, str]
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """Open the idempotent auth GET, retrying one connect failure."""
+        for attempt in range(_AUTH_CONNECT_ATTEMPTS):
+            stack = contextlib.AsyncExitStack()
+            try:
+                response = await stack.enter_async_context(
+                    session.request(
+                        method='GET',
+                        url=auth_url,
+                        headers=forwarded_headers,
+                        cookies=request.cookies,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        allow_redirects=False,
+                    ))
+            except aiohttp.ClientConnectorError:
+                await stack.aclose()
+                if attempt + 1 == _AUTH_CONNECT_ATTEMPTS:
+                    raise
+                logger.warning('Retrying OAuth2 proxy authentication after '
+                               'a connection failure')
+                await asyncio.sleep(_AUTH_CONNECT_RETRY_DELAY_SECONDS)
+                continue
+            try:
+                yield response
+            finally:
+                await stack.aclose()
+            return
+        raise AssertionError('OAuth2 proxy attempts exhausted')
 
     def get_auth_user(
             self, response: aiohttp.ClientResponse) -> Optional[models.User]:
