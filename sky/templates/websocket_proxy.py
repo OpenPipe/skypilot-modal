@@ -15,7 +15,7 @@ import os
 import struct
 import sys
 import time
-from typing import Dict, Optional
+from typing import Any, Coroutine, Dict, Optional, Sequence
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -96,7 +96,7 @@ async def run_websocket_proxy(websocket: ClientConnection,
         websocket_closed_event = asyncio.Event()
         websocket_lock = asyncio.Lock()
 
-        await asyncio.gather(
+        await _run_until_proxy_closed(websocket_closed_event, (
             stdin_to_websocket(stdin_reader, websocket, timestamps_supported,
                                websocket_closed_event, websocket_lock),
             websocket_to_stdout(websocket, stdout_writer, timestamps_supported,
@@ -104,11 +104,26 @@ async def run_websocket_proxy(websocket: ClientConnection,
                                 websocket_lock, first_message),
             latency_monitor(websocket, last_ping_time_dict,
                             websocket_closed_event, websocket_lock),
-            return_exceptions=True)
+        ))
     finally:
         if old_settings:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
                               old_settings)
+
+
+async def _run_until_proxy_closed(
+    websocket_closed_event: asyncio.Event,
+    coroutines: Sequence[Coroutine[Any, Any, None]],
+) -> None:
+    """Cancel all proxy directions when either data stream closes."""
+    tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
+    try:
+        await websocket_closed_event.wait()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def latency_monitor(websocket: ClientConnection,
