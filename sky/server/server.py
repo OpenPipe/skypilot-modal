@@ -2251,6 +2251,7 @@ def _is_relative_to(path: pathlib.Path, parent: pathlib.Path) -> bool:
 def _extract_members(zipf, members: List[zipfile.ZipInfo],
                      client_file_mounts_dir: pathlib.Path) -> None:
     """Writes the zip's members under *client_file_mounts_dir*."""
+    file_modes: Dict[pathlib.Path, int] = {}
     for member in members:
         # Determine the new path
         original_path = os.path.normpath(member.filename)
@@ -2293,11 +2294,17 @@ def _extract_members(zipf, members: List[zipfile.ZipInfo],
             # Use shutil.copyfileobj to copy files in chunks,
             # so it does not load the entire file into memory.
             shutil.copyfileobj(member_file, f)
-        # ZIP extraction does not restore Unix permissions automatically.
-        # Keep executable bits, but never restore setuid/setgid/sticky bits.
+        # Overlapping mounts can repeat read-only files. Restore modes only
+        # after all writes, without setuid/setgid/sticky bits.
+        file_modes.pop(resolved_path, None)
         mode = member.external_attr >> 16
         if member.create_system == 3 and mode:
-            new_path.chmod(mode & 0o777)
+            file_modes[resolved_path] = mode & 0o777
+
+    for path, mode in file_modes.items():
+        # A later entry may have replaced this file with a symlink.
+        if path.resolve() == path:
+            path.chmod(mode)
 
 
 async def unzip_file(zip_file_path: pathlib.Path,

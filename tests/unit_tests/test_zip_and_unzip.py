@@ -34,6 +34,49 @@ def test_uploaded_regular_file_permissions(tmp_path, mode):
         subprocess.run([str(received)], check=True, timeout=5)
 
 
+@pytest.mark.parametrize('mode', [0o444, 0o555])
+def test_overlapping_uploads_preserve_readonly_permissions(tmp_path, mode):
+    workdir = tmp_path / 'workdir'
+    workdir.mkdir()
+    source = workdir / 'readonly'
+    source.write_bytes(b'payload')
+    source.chmod(mode)
+    archive = tmp_path / 'upload.zip'
+    storage_utils.zip_files_and_folders(
+        [str(workdir), str(source)], archive, io.StringIO())
+    destination = tmp_path / 'received'
+    destination.mkdir()
+
+    asyncio.run(server.unzip_file(archive, destination))
+
+    received = destination / str(source).lstrip('/')
+    assert received.read_bytes() == b'payload'
+    assert stat.S_IMODE(received.stat().st_mode) == mode
+
+
+def test_deferred_permissions_do_not_follow_replacement_symlink(tmp_path):
+    archive = tmp_path / 'upload.zip'
+    regular = zipfile.ZipInfo('replaced')
+    regular.external_attr = (stat.S_IFREG | 0o444) << 16
+    symlink = zipfile.ZipInfo('replaced')
+    symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+    target = zipfile.ZipInfo('target')
+    target.external_attr = (stat.S_IFREG | 0o600) << 16
+    with zipfile.ZipFile(archive, 'w') as bundle:
+        bundle.writestr(regular, b'old')
+        with pytest.warns(UserWarning, match='Duplicate name'):
+            bundle.writestr(symlink, b'target')
+        bundle.writestr(target, b'new')
+    destination = tmp_path / 'received'
+    destination.mkdir()
+
+    asyncio.run(server.unzip_file(archive, destination))
+
+    assert (destination / 'replaced').is_symlink()
+    assert (destination / 'replaced').read_bytes() == b'new'
+    assert stat.S_IMODE((destination / 'target').stat().st_mode) == 0o600
+
+
 @pytest.mark.parametrize(('creator', 'attributes'), [(0, 0x20), (3, 0x20),
                                                      (0, 0o100755 << 16)])
 def test_upload_without_unix_permissions_keeps_default_mode(
