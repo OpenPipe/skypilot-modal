@@ -2293,6 +2293,11 @@ def _extract_members(zipf, members: List[zipfile.ZipInfo],
             # Use shutil.copyfileobj to copy files in chunks,
             # so it does not load the entire file into memory.
             shutil.copyfileobj(member_file, f)
+        # ZIP extraction does not restore Unix permissions automatically.
+        # Keep executable bits, but never restore setuid/setgid/sticky bits.
+        mode = member.external_attr >> 16
+        if member.create_system == 3 and mode:
+            new_path.chmod(mode & 0o777)
 
 
 async def unzip_file(zip_file_path: pathlib.Path,
