@@ -54,7 +54,28 @@ def test_overlapping_uploads_preserve_readonly_permissions(tmp_path, mode):
     assert stat.S_IMODE(received.stat().st_mode) == mode
 
 
-def test_deferred_permissions_do_not_follow_replacement_symlink(tmp_path):
+@pytest.mark.parametrize('mode', [0o444, 0o555])
+def test_repeated_upload_replaces_readonly_file(tmp_path, mode):
+    source = tmp_path / 'readonly'
+    source.touch()
+    destination = tmp_path / 'received'
+    destination.mkdir()
+    for payload in (b'first', b'second'):
+        source.chmod(0o600)
+        source.write_bytes(payload)
+        source.chmod(mode)
+        archive = tmp_path / 'upload.zip'
+        storage_utils.zip_files_and_folders([str(source)], archive,
+                                            io.StringIO())
+
+        asyncio.run(server.unzip_file(archive, destination))
+
+        received = destination / str(source).lstrip('/')
+        assert received.read_bytes() == payload
+        assert stat.S_IMODE(received.stat().st_mode) == mode
+
+
+def test_permissions_do_not_follow_replacement_symlink(tmp_path):
     archive = tmp_path / 'upload.zip'
     regular = zipfile.ZipInfo('replaced')
     regular.external_attr = (stat.S_IFREG | 0o444) << 16
