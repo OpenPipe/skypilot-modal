@@ -186,7 +186,8 @@ class RequestBody(BasePayload):
     workspace_access: Optional[str] = None
 
     def __init__(self, **data):
-        data['env_vars'] = data.get('env_vars', request_body_env_vars())
+        if 'env_vars' not in data:
+            data['env_vars'] = request_body_env_vars()
         usage_lib_entrypoint = usage_lib.messages.usage.entrypoint
         if usage_lib_entrypoint is None:
             usage_lib_entrypoint = ''
