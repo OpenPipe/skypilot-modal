@@ -26,6 +26,29 @@ from sky.provision.kubernetes import constants as k8s_constants
 from sky.provision.kubernetes import utils
 
 
+@pytest.mark.parametrize('quantity,gib', [('1G', 10**9 / 2**30), ('512Mi', 0.5),
+                                          ('1.5Gi', 1.5), ('64Gi', 64)])
+def test_process_skypilot_pods_preserves_fractional_memory(quantity, gib):
+    pod = kubernetes.client.V1Pod(
+        metadata=kubernetes.client.V1ObjectMeta(
+            labels={'skypilot-cluster-name': 'existing-hash'}),
+        status=kubernetes.client.V1PodStatus(phase='Running'),
+        spec=kubernetes.client.V1PodSpec(containers=[
+            kubernetes.client.V1Container(
+                name='ray-node',
+                resources=kubernetes.client.V1ResourceRequirements(requests={
+                    'cpu': '1',
+                    'memory': quantity
+                }))
+        ]))
+    with patch.object(utils,
+                      'get_gpu_resource_key',
+                      return_value='nvidia.com/gpu'):
+        clusters, _, _ = utils.process_skypilot_pods([pod], 'test')
+    assert len(clusters) == 1
+    assert float(clusters[0].resources.memory) == pytest.approx(gib)
+
+
 # Test for exception on permanent errors like 401 (Unauthorized)
 def test_get_kubernetes_nodes():
     with patch('sky.provision.kubernetes.utils.kubernetes.core_api'

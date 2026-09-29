@@ -5585,7 +5585,7 @@ def process_skypilot_pods(
             resources = resources_lib.Resources(
                 cloud=clouds.Kubernetes(),
                 cpus=int(cpu_request),
-                memory=int(memory_request),
+                memory=memory_request,
                 accelerators=(f'{gpu_name}:{gpu_count}'
                               if gpu_count > 0 else None))
             if pod.status.phase == 'Pending':
