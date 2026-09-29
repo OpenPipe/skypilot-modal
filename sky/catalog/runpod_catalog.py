@@ -25,20 +25,30 @@ _PULL_FREQUENCY_HOURS = 7
 _df = common.read_catalog('runpod/vms.csv',
                           pull_frequency_hours=_PULL_FREQUENCY_HOURS)
 
-# Sized variants describe guaranteed request minima, not a new static SKU or
-# transient host returned by lowestPrice. They survive Resources round trips.
-_SIZED = re.compile(r'(.+)--([1-9][0-9]*)vcpu-([1-9][0-9]*)gb$')
+# Sized variants retain guaranteed minima and the selected hourly estimate.
+# Accounting must survive round trips without consulting current availability.
+_SIZED = re.compile(r'(.+)--([1-9][0-9]*)vcpu-([1-9][0-9]*)gb-'
+                    r'([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)usd$')
 
 
-def _sized(instance_type: str) -> Tuple[str, Optional[int], Optional[int]]:
+def _sized(
+    instance_type: str
+) -> Tuple[str, Optional[int], Optional[int], Optional[float]]:
     match = _SIZED.fullmatch(instance_type)
     if match is None:
-        return instance_type, None, None
-    return match[1], int(match[2]), int(match[3])
+        return instance_type, None, None, None
+    price = float(match[4])
+    if not math.isfinite(price) or price <= 0:
+        return instance_type, None, None, None
+    return match[1], int(match[2]), int(match[3]), price
 
 
-def _quote_price(instance_type: str, cpus: int, memory_gb: int,
-                 region: Optional[str]) -> float:
+def _quote_price(instance_type: str,
+                 cpus: int,
+                 memory_gb: int,
+                 region: Optional[str],
+                 *,
+                 fresh: bool = False) -> float:
     match = re.fullmatch(r'([1-9][0-9]*)x_([\w-]+)_(SECURE|COMMUNITY)',
                          instance_type)
     if match is None:
@@ -48,9 +58,13 @@ def _quote_price(instance_type: str, cpus: int, memory_gb: int,
     if count != '1' or gpu not in runpod_utils.GPU_NAME_MAP:
         return math.inf
     gpu_count = int(count)
-    quote = runpod.get_gpu_host_quote(runpod_utils.GPU_NAME_MAP[gpu], gpu_count,
-                                      cloud_type == 'SECURE', cpus, memory_gb,
-                                      region)
+    # Admission bypasses the existing selection cache; availability and price
+    # may have changed even within its 60-second lifetime.
+    lookup = runpod.get_gpu_host_quote
+    if fresh:
+        lookup = getattr(lookup, '__wrapped__', lookup)
+    quote = lookup(runpod_utils.GPU_NAME_MAP[gpu], gpu_count,
+                   cloud_type == 'SECURE', cpus, memory_gb, region)
     if not isinstance(quote, dict):
         return math.inf
     values = [
@@ -92,14 +106,14 @@ def _memory_in_gib() -> 'pd.DataFrame':
 def get_native_gpu_host_resources(
         instance_type: str) -> Tuple[Optional[float], Optional[float]]:
     """Return CPU count and RunPod's unconverted nominal host-memory GB."""
-    base, cpus, memory = _sized(instance_type)
+    base, cpus, memory, _ = _sized(instance_type)
     if cpus is not None:
         return cpus, memory
     return common.get_vcpus_mem_from_instance_type_impl(_df, base)
 
 
 def instance_type_exists(instance_type: str) -> bool:
-    base, cpus, memory = _sized(instance_type)
+    base, cpus, memory, _ = _sized(instance_type)
     if not common.instance_type_exists_impl(_df, base):
         return False
     if cpus is None:
@@ -122,18 +136,30 @@ def get_hourly_cost(instance_type: str,
                     use_spot: bool = False,
                     region: Optional[str] = None,
                     zone: Optional[str] = None) -> float:
-    """Returns the cost, or the cheapest cost among all zones for spot."""
-    base, cpus, memory = _sized(instance_type)
+    """Return the selected sized-host estimate, or the static catalog price."""
+    base, cpus, _, estimate = _sized(instance_type)
+    if cpus is not None:
+        assert estimate is not None
+        if use_spot:
+            raise ValueError('Sized RunPod hosts do not support spot pricing.')
+        return estimate
+    return common.get_hourly_cost_impl(_df, base, use_spot, region, zone)
+
+
+def _current_hourly_cost(instance_type: str, use_spot: bool,
+                         region: Optional[str]) -> float:
+    """Fresh admission quote, separate from the durable accounting estimate."""
+    base, cpus, memory, _ = _sized(instance_type)
     if cpus is not None:
         assert memory is not None
-        return math.inf if use_spot else _quote_price(base, cpus, memory,
-                                                      region)
-    return common.get_hourly_cost_impl(_df, base, use_spot, region, zone)
+        return math.inf if use_spot else _quote_price(
+            base, cpus, memory, region, fresh=True)
+    return get_hourly_cost(instance_type, use_spot, region)
 
 
 def get_vcpus_mem_from_instance_type(
         instance_type: str) -> Tuple[Optional[float], Optional[float]]:
-    base, cpus, memory = _sized(instance_type)
+    base, cpus, memory, _ = _sized(instance_type)
     if cpus is not None:
         assert memory is not None
         return cpus, memory * (10**9 / 2**30)
@@ -211,7 +237,7 @@ def get_instance_type_for_accelerator(
         price = _quote_price(base, cpu, ram, region)
         if math.isfinite(price) and (max_hourly_cost is None or
                                      price <= max_hourly_cost):
-            sized.append((price, f'{base}--{cpu}vcpu-{ram}gb'))
+            sized.append((price, f'{base}--{cpu}vcpu-{ram}gb-{price}usd'))
     return [name for _, name in sorted(sized)], []
 
 
