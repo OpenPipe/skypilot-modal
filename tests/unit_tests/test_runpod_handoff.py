@@ -63,9 +63,12 @@ def offline_catalog(monkeypatch):
                         lambda *args, **kwargs: frame)
     catalog = importlib.import_module('sky.catalog.runpod_catalog')
     monkeypatch.setattr(catalog, '_df', frame)
+    selection_cache = adaptor.get_gpu_host_quote
+    selection_cache.cache_clear()
     with skypilot_config.replace_skypilot_config_in_process(
             config_utils.Config()):
         yield frame
+    selection_cache.cache_clear()
 
 
 def _render(tmp_path,
@@ -396,7 +399,7 @@ def test_stronger_singleton_survives_yaml_and_actual_sdk(
     quote = _host_quote()
     quote.update(minVcpu=offer_cpu, minMemory=offer_gb)
     lookup = mock.Mock(return_value=quote)
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     calls = []
     monkeypatch.setattr(adaptor, 'runpod', sdk)
     monkeypatch.setattr(ctl, 'get_gpu', lambda *args, **kwargs: {})
@@ -453,7 +456,7 @@ def test_unavailable_stronger_host_is_not_feasible(monkeypatch, offline, bad):
     quote = None if bad is None else {**_host_quote(), **bad}
     if bad == {}:
         quote = {}
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lambda *args: quote)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lambda *args: quote)
     resources = Resources(cloud=clouds.RunPod(),
                           accelerators='H200-SXM:1',
                           cpus='16+',
@@ -476,7 +479,7 @@ def test_requested_gib_rounds_up_once(gib, gb):
 
 def test_sized_resources_round_trip_and_price_bound(monkeypatch, offline):
     _singleton(offline)
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote',
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote',
                         lambda *args: _host_quote())
     resources = Resources(cloud=clouds.RunPod(),
                           accelerators='H200-SXM:1',
@@ -503,7 +506,7 @@ def test_sized_resources_round_trip_and_price_bound(monkeypatch, offline):
 def test_quote_loss_before_render_never_creates_pod(tmp_path, monkeypatch,
                                                     offline):
     _singleton(offline)
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote',
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote',
                         mock.Mock(side_effect=[_host_quote(), None]))
     with pytest.raises(exceptions.ResourcesUnavailableError,
                        match='No current RunPod host quote'):
@@ -520,7 +523,7 @@ def test_render_quote_rejection_uses_actual_capacity_fallback(
     _singleton(offline)
     rejected = None if quote is None else _host_quote() | quote
     lookup = mock.Mock(side_effect=[_host_quote(), rejected])
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     request = Resources(cloud=clouds.RunPod(),
                         cpus='16+',
                         memory='192+',
@@ -574,7 +577,7 @@ def test_render_quote_rejection_uses_actual_capacity_fallback(
 
 def test_restored_sized_instance_requires_current_offer(monkeypatch, offline):
     _singleton(offline)
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lambda *args: None)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lambda *args: None)
     resources = Resources(
         cloud=clouds.RunPod(),
         instance_type='1x_H200-SXM_SECURE--16vcpu-207gb-4.59usd')
@@ -592,7 +595,7 @@ def test_stronger_host_does_not_relax_exact_or_spot_requests(
         monkeypatch, offline, kwargs):
     _singleton(offline)
     lookup = mock.Mock(side_effect=AssertionError('Unexpected live lookup'))
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     resources = Resources(cloud=clouds.RunPod(),
                           accelerators='H200-SXM:1',
                           **{
@@ -608,7 +611,7 @@ def test_stronger_host_does_not_relax_exact_or_spot_requests(
 def test_multi_gpu_keeps_static_contract_without_unproved_quote_units(
         monkeypatch):
     lookup = mock.Mock(side_effect=AssertionError('Unexpected live lookup'))
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     resources = Resources(cloud=clouds.RunPod(),
                           accelerators='H200-SXM:4',
                           cpus='64+',
@@ -686,7 +689,7 @@ def test_successful_provision_uses_already_rendered_resources(
         tmp_path, monkeypatch, offline, later_quote):
     _singleton(offline)
     lookup = mock.Mock(return_value=_host_quote())
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     request = Resources(cloud=clouds.RunPod(),
                         cpus='16+',
                         memory='192+',
@@ -765,7 +768,7 @@ def test_selected_estimate_accounting_and_optimizer_need_no_quote(
     _singleton(offline)
     lookup = mock.Mock(return_value=_host_quote() |
                        {'uninterruptablePrice': price})
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     request = Resources(cloud=clouds.RunPod(),
                         accelerators='H200-SXM:1',
                         cpus='16+',
@@ -805,7 +808,7 @@ def test_selected_estimate_accounting_and_optimizer_need_no_quote(
 
 def test_selected_estimate_round_trip_in_fresh_process(monkeypatch, offline):
     _singleton(offline)
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote',
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote',
                         lambda *args: _host_quote())
     request = Resources(cloud=clouds.RunPod(),
                         accelerators='H200-SXM:1',
@@ -828,6 +831,7 @@ from sky.catalog import common
 common.read_catalog = lambda *args, **kwargs: pd.DataFrame(json.loads(sys.argv[1]))
 from sky.adaptors import runpod
 runpod.get_gpu_host_quote = denied
+runpod._get_gpu_host_quote = denied
 from sky.resources import Resources
 resource, = Resources.from_yaml_config(json.loads(sys.stdin.read()))
 for restored in (resource, resource.copy(), pickle.loads(pickle.dumps(resource))):
@@ -864,7 +868,7 @@ def test_durable_estimate_does_not_authorize_new_allocation(
         monkeypatch, offline, changed):
     _singleton(offline)
     lookup = mock.Mock(return_value=_host_quote())
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     request = Resources(cloud=clouds.RunPod(),
                         accelerators='H200-SXM:1',
                         cpus='16+',
@@ -929,7 +933,7 @@ def test_invalid_or_unpriced_sized_identity_is_not_an_estimate(
     _singleton(offline)
     lookup = mock.Mock(
         side_effect=AssertionError('Invalid price queried provider'))
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     with pytest.raises(ValueError):
         Resources(cloud=clouds.RunPod(),
                   instance_type='1x_H200-SXM_SECURE--16vcpu-207gb' +
@@ -941,7 +945,7 @@ def test_selection_estimate_remains_distinct_from_admission_quote(
         monkeypatch, offline):
     _singleton(offline)
     lookup = mock.Mock(return_value=_host_quote())
-    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
     request = Resources(cloud=clouds.RunPod(),
                         accelerators='H200-SXM:1',
                         cpus='16+',
@@ -957,4 +961,186 @@ def test_selection_estimate_remains_distinct_from_admission_quote(
     assert values['instance_type'] == '1x_H200-SXM_SECURE'
     assert values['bid_per_gpu'] == '5.25'
     assert selected.get_cost(3600) == 4.59  # Estimate, not a billing receipt.
+    assert lookup.call_count == 2
+
+
+@pytest.mark.parametrize('changed_price', [4.59, 5.25])
+@pytest.mark.parametrize('regions', [('US',), ('US', 'EU')])
+def test_optimizer_keeps_failed_host_blocked_after_requote(
+        monkeypatch, offline, changed_price, regions):
+    _singleton(offline)
+    if len(regions) > 1:
+        offline.loc[1] = offline.iloc[0]
+        offline.loc[1, 'Region'] = regions[1]
+        offline.loc[1, 'AvailabilityZone'] = 'EU-TEST-1'
+    lookup = mock.Mock(return_value=_host_quote())
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
+    monkeypatch.setattr(optimizer.sky_check,
+                        'get_cached_enabled_clouds_or_refresh',
+                        lambda *args, **kwargs: [clouds.RunPod()])
+    monkeypatch.setattr(resources_utils, 'need_to_query_reservations',
+                        lambda: False)
+    with dag_lib.Dag() as dag:
+        task = task_lib.Task('quote-changing-failover').set_resources(
+            Resources(cloud=clouds.RunPod(),
+                      accelerators='H200-SXM:1',
+                      cpus='16+',
+                      memory='192+'))
+    optimizer.Optimizer.optimize(dag, quiet=True)
+    failed = task.best_resources
+    assert failed is not None and failed.region in regions
+    lookup.return_value = _host_quote() | {
+        'uninterruptablePrice': changed_price
+    }
+    adaptor.get_gpu_host_quote.cache_clear(
+    )  # Deterministic selection TTL expiry.
+    task.best_resources = None
+    if len(regions) == 1:
+        with pytest.raises(exceptions.ResourcesUnavailableError):
+            optimizer.Optimizer.optimize(dag,
+                                         blocked_resources=[failed],
+                                         quiet=True)
+    else:
+        optimizer.Optimizer.optimize(dag,
+                                     blocked_resources=[failed],
+                                     quiet=True)
+        assert task.best_resources is not None
+        assert task.best_resources.region != failed.region
+    assert lookup.call_count >= 2
+
+
+@pytest.mark.parametrize('override,expected', [
+    ({}, True),
+    ({
+        'instance_type': '1x_H200-SXM_SECURE--32vcpu-207gb-5.25usd'
+    }, False),
+    ({
+        'instance_type': '1x_H200-SXM_SECURE--16vcpu-251gb-5.25usd'
+    }, False),
+    ({
+        'instance_type': '1x_H100-SXM_SECURE--16vcpu-207gb-5.25usd'
+    }, False),
+    ({
+        'instance_type': '1x_H200-SXM_SECURE--16vcpu-207gb-nanusd'
+    }, False),
+    ({
+        'instance_type': '1x_H200-SXM_SECURE--16vcpu-207gb'
+    }, False),
+    ({
+        'region': 'EU'
+    }, False),
+    ({
+        'zone': 'US-TEST-2'
+    }, False),
+    ({
+        'use_spot': True
+    }, False),
+    ({
+        'cloud': clouds.AWS()
+    }, False),
+])
+def test_priced_identity_reuse_and_blocking_preserve_shape(
+        monkeypatch, offline, override, expected):
+    _singleton(offline)
+    lookup = mock.Mock(
+        side_effect=AssertionError('Comparison queried provider'))
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
+    selected = Resources(
+        cloud=clouds.RunPod(),
+        instance_type='1x_H200-SXM_SECURE--16vcpu-207gb-4.59usd',
+        region='US',
+        zone='US-TEST-1',
+        use_spot=False,
+        accelerators={'H200-SXM': 1})
+    requoted = selected.copy(**({
+        'instance_type': '1x_H200-SXM_SECURE--16vcpu-207gb-5.25usd'
+    } | override))
+    assert selected.should_be_blocked_by(requoted) is expected
+    assert selected.less_demanding_than(requoted) is expected
+    assert requoted.less_demanding_than(selected) is expected
+    lookup.assert_not_called()
+
+
+def test_priced_blocking_retains_cloud_wildcard_and_literal_unknown_cloud(
+        monkeypatch, offline):
+    _singleton(offline)
+    lookup = mock.Mock(
+        side_effect=AssertionError('Comparison queried provider'))
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
+    selected = Resources(
+        cloud=clouds.RunPod(),
+        instance_type='1x_H200-SXM_SECURE--16vcpu-207gb-4.59usd')
+    wildcard = Resources(
+        instance_type='1x_H200-SXM_SECURE--16vcpu-207gb-5.25usd')
+    assert selected.should_be_blocked_by(wildcard)
+    assert wildcard.less_demanding_than(selected)
+    assert not wildcard.less_demanding_than(selected.copy(cloud=None),
+                                            check_cloud=False)
+    assert selected.should_be_blocked_by(Resources(cloud=clouds.RunPod()))
+    assert not Resources(cloud=clouds.RunPod()).should_be_blocked_by(selected)
+    lookup.assert_not_called()
+
+
+def test_admission_never_falls_back_to_a_replaced_selection_wrapper(
+        monkeypatch, offline):
+    _singleton(offline)
+    fresh = mock.Mock(return_value=_host_quote())
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', fresh)
+    request = Resources(cloud=clouds.RunPod(),
+                        accelerators='H200-SXM:1',
+                        cpus='16+',
+                        memory='192+',
+                        region='US')
+    selected, = request.cloud._get_feasible_launchable_resources(
+        request).resources_list
+    cached = mock.Mock(return_value=_host_quote())
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', cached)
+    fresh.return_value = None
+    with pytest.raises(exceptions.ResourcesUnavailableError):
+        selected.cloud.make_deploy_resources_variables(
+            selected, resources_utils.ClusterName('offline', 'offline'),
+            clouds.Region('US'), [clouds.Zone('US-TEST-1')], 1)
+    cached.assert_not_called()
+    assert fresh.call_count == 2
+
+
+def test_sized_spot_render_refusal_uses_capacity_exception(
+        monkeypatch, offline):
+    _singleton(offline)
+    lookup = mock.Mock(side_effect=AssertionError('Spot quote is unsupported'))
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
+    spot = Resources(cloud=clouds.RunPod(),
+                     instance_type='1x_H200-SXM_SECURE--16vcpu-207gb-4.59usd',
+                     region='US',
+                     use_spot=True)
+    assert not spot.cloud._get_feasible_launchable_resources(
+        spot).resources_list
+    with pytest.raises(ValueError, match='do not support spot'):
+        spot.get_cost(3600)
+    with pytest.raises(exceptions.ResourcesUnavailableError):
+        spot.cloud.make_deploy_resources_variables(
+            spot, resources_utils.ClusterName('offline', 'offline'),
+            clouds.Region('US'), [clouds.Zone('US-TEST-1')], 1)
+    lookup.assert_not_called()
+
+
+def test_editable_estimate_does_not_authorize_price_over_cap(
+        monkeypatch, offline):
+    _singleton(offline)
+    lookup = mock.Mock(return_value=_host_quote())
+    monkeypatch.setattr(adaptor, '_get_gpu_host_quote', lookup)
+    edited = Resources(
+        cloud=clouds.RunPod(),
+        instance_type='1x_H200-SXM_SECURE--16vcpu-207gb-0.0001usd',
+        region='US',
+        max_hourly_cost=4.0)
+    edited.validate()
+    assert edited.get_cost(
+        3600) == 0.0001  # Editable estimate, not billing truth.
+    assert not edited.cloud._get_feasible_launchable_resources(
+        edited).resources_list
+    with pytest.raises(exceptions.ResourcesUnavailableError):
+        edited.cloud.make_deploy_resources_variables(
+            edited, resources_utils.ClusterName('offline', 'offline'),
+            clouds.Region('US'), [clouds.Zone('US-TEST-1')], 1)
     assert lookup.call_count == 2

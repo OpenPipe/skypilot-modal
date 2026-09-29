@@ -222,8 +222,6 @@ class RunPod(clouds.Cloud):
 
         instance_type = resources.instance_type
         use_spot = resources.use_spot
-        hourly_cost = self.instance_type_to_hourly_cost(
-            instance_type=instance_type, use_spot=use_spot, region=region.name)
 
         gpu_count = list(acc_dict.values())[0] if acc_dict is not None else 1
 
@@ -266,6 +264,12 @@ class RunPod(clouds.Cloud):
             # The sized catalog identity retains minima; the provider accepts
             # the underlying GPU type plus the explicit CPU/RAM floors.
             instance_type = instance_type.split('--', 1)[0]
+
+        else:
+            hourly_cost = self.instance_type_to_hourly_cost(
+                instance_type=instance_type,
+                use_spot=use_spot,
+                region=region.name)
 
         return {
             **gpu_requirements,
