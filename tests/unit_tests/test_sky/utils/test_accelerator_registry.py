@@ -46,19 +46,20 @@ class TestCanonicalizeAcceleratorName:
         ('H200', 'Azure', 'H200'),
         ('H200', 'Lambda', 'H200'),
         ('A10', 'RunPod', 'A10'),
+        ('RTX6000', 'RunPod', 'RTX6000'),
         ('H100', 'RunPod', 'H100'),
         ('GPU', 'RunPod', 'GPU'),
     ])
-    def test_provider_name_preserves_exact_and_ambiguous_matches(
+    def test_provider_alias_preserves_other_devices_and_clouds(
             self, monkeypatch, name, cloud, expected):
         frame = pd.DataFrame({
             'AcceleratorName': [
                 'H200', 'H200-SXM', 'H100', 'H100-SXM', 'GPU', 'GPU1', 'GPU2',
-                'GH200', 'A10', 'A100'
+                'GH200', 'A10', 'A100', 'RTX6000', 'RTX6000-Ada'
             ],
             'Clouds': [
                 'AWS', 'RunPod', 'RunPod', 'RunPod', 'AWS', 'RunPod', 'RunPod',
-                'Lambda', 'AWS', 'RunPod'
+                'Lambda', 'AWS', 'RunPod', 'AWS', 'RunPod'
             ]
         })
         monkeypatch.setattr(accelerator_registry, '_accelerator_df', frame)

@@ -88,6 +88,11 @@ def canonicalize_accelerator_name(accelerator: str,
     if cloud is not None:
         cloud_str = str(cloud)
 
+    # RunPod calls its H200 offering H200-SXM. Keep the provider alias explicit:
+    # suffixes on other devices can denote a different GPU architecture.
+    if cloud_str == 'RunPod' and accelerator.lower() == 'h200':
+        return 'H200-SXM'
+
     # TPU names are always lowercase.
     if accelerator.lower().startswith('tpu-'):
         return accelerator.lower()
@@ -96,22 +101,11 @@ def canonicalize_accelerator_name(accelerator: str,
     df = _accelerator_df[_accelerator_df['AcceleratorName'].str.contains(
         accelerator, case=False, regex=True)]
     names = []
-    exact_name = None
     for name, clouds in df[['AcceleratorName', 'Clouds']].values:
         if accelerator.lower() == name.lower():
-            exact_name = name
+            return name
         if cloud_str is None or cloud_str in clouds:
             names.append(name)
-
-    if exact_name is not None:
-        # A provider may name a globally recognized GPU differently (H200-SXM
-        # on RunPod). Prefer its unique suffix variant without guessing between
-        # models (A10/A100) or changing Kubernetes' locally defined names.
-        if (cloud_str not in [None, 'Kubernetes'] and
-                exact_name not in names and len(names) == 1 and
-                names[0].lower().startswith(exact_name.lower() + '-')):
-            return names[0]
-        return exact_name
 
     # Look for Kubernetes accelerators online if the accelerator is not found
     # in the public cloud catalog. This is to make sure custom accelerators
