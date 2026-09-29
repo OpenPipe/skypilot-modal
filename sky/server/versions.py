@@ -303,7 +303,9 @@ def check_modal_deadline_api(dag: 'sky.Dag',
                 None,
                 override_configs=resource.cluster_config_overrides) is not None
             for task in dag.tasks
-            for resource in task.resources):
+            for resource in task.resources
+            if resource.cloud is None or
+            isinstance(resource.cloud, sky.clouds.Modal)):
         return
     if (peer_version is None or
             peer_version < constants.MIN_MODAL_SANDBOX_DEADLINE_API_VERSION):

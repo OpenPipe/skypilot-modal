@@ -299,10 +299,11 @@ def test_deadline_compatible_peer_and_unselected_feature(
     request.assert_called_once()
 
 
-def test_global_deadline_also_rejects_old_peer(monkeypatch):
+@pytest.mark.parametrize('infra', ['modal', None])
+def test_global_deadline_also_rejects_old_peer(infra, monkeypatch):
     dag = dag_utils.convert_entrypoint_to_dag(
         task.Task.from_yaml_config({'resources': {
-            'infra': 'modal'
+            'infra': infra
         }}))
     monkeypatch.setattr(sdk.versions, 'get_remote_api_version', lambda: 65)
     request = mock.Mock(side_effect=AssertionError('unexpected API request'))
@@ -316,6 +317,28 @@ def test_global_deadline_also_rejects_old_peer(monkeypatch):
                            match='Modal Sandbox deadlines'):
             inspect.unwrap(sdk.validate)(dag)
     request.assert_not_called()
+
+
+@pytest.mark.parametrize('infra', ['kubernetes', 'aws'])
+@pytest.mark.parametrize('api_version', [None, 64, 65])
+def test_unrelated_global_deadline_allows_non_modal(infra, api_version,
+                                                    monkeypatch):
+    dag = dag_utils.convert_entrypoint_to_dag(
+        task.Task.from_yaml_config({'resources': {
+            'infra': infra
+        }}))
+    monkeypatch.setattr(sdk.versions, 'get_remote_api_version',
+                        lambda: api_version)
+    request = mock.Mock(side_effect=RuntimeError('supported server request'))
+    monkeypatch.setattr(sdk.server_common, 'make_authenticated_request',
+                        request)
+    with skypilot_config.replace_skypilot_config(
+            config_utils.Config({'modal': {
+                'deadline': 2000000000.75
+            }})):
+        with pytest.raises(RuntimeError, match='supported server request'):
+            inspect.unwrap(sdk.validate)(dag)
+    request.assert_called_once()
 
 
 @pytest.mark.parametrize('api_version', [None, 64, 65])
