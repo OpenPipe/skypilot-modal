@@ -1,0 +1,236 @@
+"""Finite Modal lifetimes preserve admission time through delayed startup."""
+
+import pathlib
+import shlex
+import signal
+import subprocess
+import time
+from types import SimpleNamespace
+from unittest import mock
+
+import jinja2
+import psutil
+import pytest
+import yaml
+
+from sky import clouds
+from sky import task
+from sky.provision import common
+from sky.provision.modal import deadline
+from sky.provision.modal import instance
+from sky.provision.modal import modal_utils
+from sky.utils import resources_utils
+
+
+@pytest.mark.parametrize(
+    'value',
+    [True, False, '100', 0, -1,
+     float('nan'), float('inf')])
+def test_invalid_deadline(value):
+    with pytest.raises(ValueError, match='finite Unix'):
+        deadline.validate(value)
+
+
+def test_rendered_task_binds_deadline(monkeypatch):
+    monkeypatch.setattr(clouds.Modal, '_get_active_environment_name',
+                        classmethod(lambda cls: 'test'))
+    config = {
+        'resources': {
+            'infra': 'modal',
+            'instance_type': '4CPU--16GB'
+        },
+        'config': {
+            'modal': {
+                'deadline': 200.75
+            }
+        }
+    }
+    value = task.Task.from_yaml_config(config)
+    resource = next(iter(value.resources))
+    clouds.Modal.check_features_are_supported(
+        resource, {clouds.CloudImplementationFeatures.AUTODOWN})
+    variables = clouds.Modal().make_deploy_resources_variables(
+        resource, resources_utils.ClusterName('test', 'test'),
+        clouds.Region('auto'), None, 1)
+    template = pathlib.Path(
+        __file__).parents[2] / 'sky/templates/modal-ray.yml.j2'
+    rendered = yaml.safe_load(
+        jinja2.Template(template.read_text()).render(**variables,
+                                                     credentials={}))
+    node = rendered['available_node_types']['ray_head_default']['node_config']
+    assert node['Deadline'] == 200.75
+    assert node['Timeout'] == 86400
+
+
+@pytest.fixture
+def provider(monkeypatch):
+    sandbox = mock.Mock(object_id='sb-accepted')
+    sandbox.poll.return_value = None
+    sandbox.get_tags.return_value = {deadline.TAG: '200.75'}
+    create = mock.Mock(return_value=sandbox)
+    lookup = mock.Mock(return_value={})
+    tunnel = mock.Mock(return_value=('host', 22))
+    monkeypatch.setattr(
+        instance, 'modal_adaptor',
+        SimpleNamespace(modal=SimpleNamespace(Sandbox=SimpleNamespace(
+            create=create))))
+    monkeypatch.setattr(modal_utils, 'get_active_sandboxes_by_name', lookup)
+    monkeypatch.setattr(modal_utils, 'get_app', lambda **_: 'app')
+    monkeypatch.setattr(modal_utils, 'get_image', lambda _: 'image')
+    monkeypatch.setattr(modal_utils, 'get_modal_env_secret', lambda: None)
+    monkeypatch.setattr(modal_utils, 'get_ssh_tunnel', tunnel)
+    monkeypatch.setattr(deadline.time, 'time', lambda: 100)
+    config = common.ProvisionConfig(provider_config={},
+                                    authentication_config={},
+                                    docker_config={},
+                                    node_config={
+                                        'PublicKey': 'public',
+                                        'Timeout': 86400,
+                                        'Deadline': 200.75
+                                    },
+                                    count=1,
+                                    tags={},
+                                    resume_stopped_nodes=False,
+                                    ports_to_open_on_launch=[])
+    return sandbox, create, lookup, tunnel, config
+
+
+def run(config):
+    return instance.run_instances('auto', 'test', 'test-on-cloud', config)
+
+
+def test_provider_recomputes_budget_after_preparation(provider, monkeypatch):
+    sandbox, create, _, tunnel, config = provider
+    monkeypatch.setattr(
+        modal_utils, 'get_image', lambda _: monkeypatch.setattr(
+            deadline.time, 'time', lambda: 130) or 'image')
+    assert run(config).head_instance_id == sandbox.object_id
+    assert create.call_args.kwargs['timeout'] == 70
+    assert create.call_args.kwargs['tags'][deadline.TAG] == '200.75'
+    assert create.call_args.args[-2] == '200.75'
+    tunnel.assert_called_once_with(sandbox, timeout=70)
+
+
+def test_expired_before_request_does_not_create(provider, monkeypatch):
+    _, create, lookup, _, config = provider
+    monkeypatch.setattr(deadline.time, 'time', lambda: 201)
+    with pytest.raises(TimeoutError):
+        run(config)
+    create.assert_not_called()
+    lookup.assert_not_called()
+
+
+def test_expired_after_preparation_does_not_create(provider, monkeypatch):
+    _, create, _, _, config = provider
+    monkeypatch.setattr(
+        modal_utils, 'get_image', lambda _: monkeypatch.setattr(
+            deadline.time, 'time', lambda: 201) or 'image')
+    with pytest.raises(TimeoutError):
+        run(config)
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize('failure', [TimeoutError, KeyboardInterrupt])
+def test_accepted_id_is_logged_before_readiness_failure(provider, monkeypatch,
+                                                        failure):
+    sandbox, create, _, tunnel, config = provider
+    logs = []
+    monkeypatch.setattr(instance.logger, 'info', logs.append)
+    tunnel.side_effect = failure
+    with pytest.raises(failure):
+        run(config)
+    assert any(sandbox.object_id in message for message in logs)
+    create.assert_called_once()
+    # No success record, no retry, and no fabricated termination receipt.
+    sandbox.terminate.assert_not_called()
+
+
+def test_same_deadline_reuses_without_renewal(provider):
+    sandbox, create, lookup, _, config = provider
+    lookup.return_value = {sandbox.object_id: sandbox}
+    record = run(config)
+    assert record.created_instance_ids == []
+    assert record.head_instance_id == sandbox.object_id
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize('existing', [None, '201', '100'])
+def test_existing_deadline_cannot_change(provider, existing):
+    sandbox, create, lookup, _, config = provider
+    sandbox.get_tags.return_value = {deadline.TAG: existing}
+    lookup.return_value = {sandbox.object_id: sandbox}
+    with pytest.raises(RuntimeError, match='Cannot change'):
+        run(config)
+    create.assert_not_called()
+
+
+def test_delayed_entrypoint_does_not_start_ssh_or_setup(tmp_path):
+    marker = tmp_path / 'started'
+    result = subprocess.run(deadline.command(
+        f'touch {shlex.quote(str(marker))}',
+        time.time() - 1),
+                            check=False)
+    assert result.returncode == 124
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+def test_entrypoint_expiry_and_cancel_end_child_group(tmp_path, cancel):
+    marker = tmp_path / 'started'
+    script = (f'echo $$ > {shlex.quote(str(marker))}; sleep 30 & '
+              f'echo $! >> {shlex.quote(str(marker))}; wait')
+    start = time.monotonic()
+    process = subprocess.Popen(deadline.command(script, time.time() + 0.7))
+    try:
+        while time.monotonic() - start < 2:
+            if marker.exists() and len(marker.read_text().splitlines()) == 2:
+                break
+            time.sleep(0.01)
+        children = [int(pid) for pid in marker.read_text().splitlines()]
+        assert len(children) == 2
+        if cancel:
+            process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=3) == (143 if cancel else 124)
+        assert time.monotonic() - start < 3
+        for pid in children:
+            try:
+                assert psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+
+
+def test_entrypoint_preserves_early_exit():
+    result = subprocess.run(deadline.command('exit 7',
+                                             time.time() + 10),
+                            check=False)
+    assert result.returncode == 7
+
+
+def test_expiry_after_create_retains_identity_without_replay(
+        provider, monkeypatch):
+    sandbox, create, _, tunnel, config = provider
+    logs = []
+    monkeypatch.setattr(instance.logger, 'info', logs.append)
+
+    def accepted(*args, **kwargs):
+        monkeypatch.setattr(deadline.time, 'time', lambda: 201)
+        return sandbox
+
+    create.side_effect = accepted
+    with pytest.raises(TimeoutError):
+        run(config)
+    assert any(sandbox.object_id in message for message in logs)
+    create.assert_called_once()
+    tunnel.assert_not_called()
+
+
+def test_down_reconciles_accepted_but_not_ready_sandbox(provider):
+    sandbox, create, lookup, _, _ = provider
+    lookup.return_value = {sandbox.object_id: sandbox}
+    instance.terminate_instances('test-on-cloud', {'environment_name': 'test'})
+    sandbox.terminate.assert_called_once_with(wait=True)
+    create.assert_not_called()
