@@ -1961,6 +1961,21 @@ By default, SkyPilot automatically creates a single container named ``ray-node``
           - name: ray-node
             ...
 
+For a fixed lifetime across provisioning delays, set
+``pod_config.metadata.annotations.skypilot-absolute-deadline`` to an absolute
+Unix timestamp in seconds, encoded as a string. During provisioning, SkyPilot
+tightens each newly created Pod's ``activeDeadlineSeconds`` after observing its
+``status.startTime``, reserving its ``terminationGracePeriodSeconds`` (30 seconds
+when omitted). An existing shorter ``activeDeadlineSeconds`` is preserved.
+Expired or invalid deadlines fail provisioning, including while waiting for
+queue admission. Pods without this annotation are unchanged.
+
+This requires an API server containing the deadline implementation; older
+servers only pass the annotation through. It is a kubelet termination backstop,
+not a guarantee of physical deletion by the timestamp. An unavailable API or
+node can delay reconciliation or termination. Keep an independent owner and
+cleanup deadline, including for failures before SkyPilot observes a start time.
+
 .. _config-yaml-kubernetes-enable-docker:
 
 ``kubernetes.enable_docker``

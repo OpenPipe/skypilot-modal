@@ -17,6 +17,7 @@ from sky.adaptors import kubernetes
 from sky.provision import common
 from sky.provision import constants
 from sky.provision import docker_utils
+from sky.provision.kubernetes import _pod_deadline
 from sky.provision.kubernetes import config as config_lib
 from sky.provision.kubernetes import constants as k8s_constants
 from sky.provision.kubernetes import host_network_probe
@@ -1105,6 +1106,7 @@ def _wait_for_pods_to_schedule(namespace,
     if not new_nodes:
         return
     expected_pod_names = {node.metadata.name for node in new_nodes}
+    deadlines = _pod_deadline.PodDeadlines(new_nodes)
     # Where each expected pod's own event history starts, for explaining one
     # that goes away.
     events_since = _pod_events_since(new_nodes, create_pods_start)
@@ -1205,6 +1207,7 @@ def _wait_for_pods_to_schedule(namespace,
     iteration = 0
     transport_error_since: Optional[float] = None
     while _evaluate_timeout():
+        deadlines.check()
         # Get all pods in a single API call using the cluster name label
         # which all pods in new_nodes should share
         cluster_name_on_cloud = new_nodes[0].metadata.labels[
@@ -1215,6 +1218,7 @@ def _wait_for_pods_to_schedule(namespace,
                 label_selector=(f'{constants.TAG_SKYPILOT_CLUSTER_NAME}='
                                 f'{cluster_name_on_cloud}'),
                 _request_timeout=_POD_POLL_REQUEST_TIMEOUT).items
+            deadlines.reconcile(namespace, context, pods)
             transport_error_since = None
         except (kubernetes.api_exception(),
                 kubernetes.urllib3_http_error()) as e:
@@ -1517,6 +1521,7 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
 
     # Create a set of pod names we're waiting for
     expected_pod_names = {pod.metadata.name for pod in new_pods}
+    deadlines = _pod_deadline.PodDeadlines(new_pods)
 
     def _check_init_containers(pod) -> Optional[_InitContainerProgress]:
         """Check init containers for errors and return the one holding up pod
@@ -1739,6 +1744,7 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
     transport_error_since: Optional[float] = None
     last_status_msg: Optional[str] = None
     while True:
+        deadlines.check()
         # Get all pods in a single API call
         cluster_name_on_cloud = new_pods[0].metadata.labels[
             constants.TAG_SKYPILOT_CLUSTER_NAME]
@@ -1748,6 +1754,7 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
                 label_selector=(f'{constants.TAG_SKYPILOT_CLUSTER_NAME}='
                                 f'{cluster_name_on_cloud}'),
                 _request_timeout=_POD_POLL_REQUEST_TIMEOUT).items
+            deadline_ready = deadlines.reconcile(namespace, context, all_pods)
             transport_error_since = None
         except (kubernetes.api_exception(),
                 kubernetes.urllib3_http_error()) as e:
@@ -1853,6 +1860,9 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
                     _raise_stalled(pod_name, pending_reason)
 
         if all_pods_running:
+            if not deadline_ready:
+                raise config_lib.KubernetesError(
+                    'Pod start time is unavailable for its absolute deadline')
             break
 
         if pending_reasons_count:
@@ -2312,6 +2322,7 @@ def _create_pods(region: str, cluster_name: str, cluster_name_on_cloud: str,
     namespace = kubernetes_utils.get_namespace_from_config(provider_config)
     context = kubernetes_utils.get_control_context_from_config(provider_config)
     pod_spec = copy.deepcopy(config.node_config)
+    _pod_deadline.parse(pod_spec.get('metadata', {}).get('annotations'))
     create_pods_start = datetime.datetime.now(datetime.timezone.utc)
     # Closes the provision-setup segment of this launch attempt and opens the
     # admission-wait one. The same reference point _wait_for_pods_to_schedule
