@@ -1396,6 +1396,23 @@ def test_parse_cpu_or_gpu_resource_to_float():
     assert utils.parse_cpu_or_gpu_resource_to_float('') == 0.0  # Empty string
 
 
+@pytest.mark.parametrize('quantity,expected_bytes', [
+    ('64G', 64 * 10**9),
+    ('64Gi', 64 * 2**30),
+    ('512M', 512 * 10**6),
+    ('512Mi', 512 * 2**20),
+    ('1k', 1000),
+    ('1Ki', 1024),
+    ('64e9', 64 * 10**9),
+    ('68719476736', 64 * 2**30),
+    ('0.5Gi', 2**29),
+])
+def test_parse_memory_resource_quantity_units(quantity, expected_bytes):
+    assert utils.parse_memory_resource(quantity) == expected_bytes
+    assert utils.parse_memory_resource(quantity,
+                                       unit='G') == expected_bytes / 2**30
+
+
 def test_parse_memory_resource_with_millibytes():
     """Test parse_memory_resource function with lowercase 'm' suffix.
 
@@ -2319,6 +2336,21 @@ def test_filter_pods_sorts_by_name(unsorted_pod_names,
 
 class TestCheckInstanceFits:
     """Tests for check_instance_fits function."""
+
+    @pytest.mark.parametrize('memory_capacity,expected_fit', [
+        ('64G', False),
+        ('68719476735', False),
+        ('68719476736', True),
+        ('64Gi', True),
+        ('68.719476736G', True),
+    ])
+    def test_memory_capacity_uses_kubernetes_units(self, memory_capacity,
+                                                   expected_fit):
+        node = self._create_mock_node('node', '16', memory_capacity)
+        with patch('sky.provision.kubernetes.utils.get_kubernetes_nodes',
+                   return_value=[node]):
+            fits, _ = utils.check_instance_fits('ctx', '8CPU--64GB')
+        assert fits is expected_fit
 
     def _create_mock_node(self,
                           name: str,
@@ -4264,6 +4296,16 @@ def _make_node(cpu_cap: str,
 
 class TestAdjustResourcesToAllocatable:
     """Tests for adjust_resources_to_allocatable."""
+
+    @pytest.mark.parametrize('capacity',
+                             ['68719476736', '68.719476736G', '64Gi'])
+    @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
+    def test_equivalent_memory_quantities_clamp_identically(
+            self, mock_nodes, capacity):
+        mock_nodes.return_value = [_make_node('16', capacity, '16', '60Gi')]
+        cpus, memory = utils.adjust_resources_to_allocatable(8.0, 64.0, 'ctx')
+        assert cpus == 8.0
+        assert memory == pytest.approx(60 - 64 * 0.05)
 
     @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
     def test_dryrun_returns_original(self, mock_nodes):
