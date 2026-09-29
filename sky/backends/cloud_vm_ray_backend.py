@@ -3344,8 +3344,8 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 if (requested_deadline is not None and
                         requested_deadline != actual_modal_deadline):
                     requested_resource_list.append(
-                        f'{task.num_nodes}x {resource} deadline={requested_deadline!r}'
-                    )
+                        f'{task.num_nodes}x {resource} '
+                        f'deadline={requested_deadline!r}')
                     continue
                 if actual_modal_deadline is not None:
                     # Reuse/recreation keeps the provider's original cutoff,
