@@ -301,7 +301,9 @@ def check_modal_deadline_api(dag: 'sky.Dag',
             skypilot_config.get_nested(
                 ('modal', 'deadline'),
                 None,
-                override_configs=resource.cluster_config_overrides) is not None
+                override_configs={
+                    'modal': resource.cluster_config_overrides.get('modal', {})
+                }) is not None
             for task in dag.tasks
             for resource in task.resources
             if resource.cloud is None or

@@ -341,6 +341,35 @@ def test_unrelated_global_deadline_allows_non_modal(infra, api_version,
     request.assert_called_once()
 
 
+@pytest.mark.parametrize('infra', ['modal', None])
+@pytest.mark.parametrize('value', [None, 2000000000.75])
+@pytest.mark.parametrize('peer', [None, 65, 66])
+def test_client_guard_preserves_server_plugin_overrides(infra, value, peer,
+                                                        monkeypatch):
+    config = {'server_plugin': {'option': 'value'}}
+    if value is not None:
+        config['modal'] = {'deadline': value}
+    dag = dag_utils.convert_entrypoint_to_dag(
+        task.Task.from_yaml_config({
+            'resources': {
+                'infra': infra
+            },
+            'config': config
+        }))
+    monkeypatch.setattr(sdk.versions, 'get_remote_api_version', lambda: peer)
+    request = mock.Mock(side_effect=RuntimeError('supported server request'))
+    monkeypatch.setattr(sdk.server_common, 'make_authenticated_request',
+                        request)
+    if value is not None and peer != 66:
+        with pytest.raises(exceptions.APINotSupportedError):
+            inspect.unwrap(sdk.validate)(dag)
+        request.assert_not_called()
+    else:
+        with pytest.raises(RuntimeError, match='supported server request'):
+            inspect.unwrap(sdk.validate)(dag)
+        request.assert_called_once()
+
+
 @pytest.mark.parametrize('api_version', [None, 64, 65])
 @pytest.mark.parametrize(
     'body_class',
