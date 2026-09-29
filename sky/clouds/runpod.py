@@ -288,6 +288,7 @@ class RunPod(clouds.Cloud):
             if '--' in resources.instance_type:
                 # pylint: disable=import-outside-toplevel
                 from sky.catalog import runpod_catalog
+
                 # pylint: disable-next=protected-access
                 price = runpod_catalog._current_hourly_cost(
                     resources.instance_type, resources.use_spot,
