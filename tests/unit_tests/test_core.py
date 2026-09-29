@@ -186,6 +186,56 @@ def test_existing_namespace_without_yaml_path_rejected(monkeypatch):
         CloudVmRayBackend().check_resources_fit_cluster(handle, task)
 
 
+@pytest.mark.parametrize('terminated', [False, True])
+@pytest.mark.parametrize('requested', ['unresolved', 'kubernetes', None])
+def test_namespace_binding_cannot_reuse_aws(requested, terminated, monkeypatch):
+    config = {} if requested is None else {
+        'kubernetes': {
+            'namespace': 'models'
+        }
+    }
+    task = sky.Task.from_yaml_config({
+        'config': config,
+        'resources': {
+            'infra': 'k8s/ctx'
+        } if requested == 'kubernetes' else {},
+    })
+    monkeypatch.setattr(clouds.AWS, 'get_accelerators_from_instance_type',
+                        lambda *a: None)
+    original = sky.Resources(infra='aws/us-east-1',
+                             instance_type='m5.large',
+                             cpus=2,
+                             memory=8)
+    handle = mock.Mock(spec=CloudVmRayResourceHandle,
+                       cluster_name='existing',
+                       cluster_yaml='/generated/existing.yml',
+                       launched_resources=original,
+                       launched_nodes=1)
+    record = {
+        'handle': handle,
+        'status': status_lib.ClusterStatus.UP,
+        'cluster_ever_up': True,
+        'config_hash': None
+    }
+    monkeypatch.setattr(global_user_state, 'get_cluster_from_name',
+                        lambda *a, **kw: record)
+    monkeypatch.setattr(backend_utils, 'refresh_cluster_record',
+                        lambda *a, **kw: None if terminated else record)
+    monkeypatch.setattr(global_user_state, 'get_status_from_cluster_name',
+                        lambda *a: None)
+    monkeypatch.setattr(global_user_state, 'get_cluster_yaml_str',
+                        lambda *a: 'provider: {type: aws}\n')
+    backend = CloudVmRayBackend()
+    if requested is not None:
+        with pytest.raises(ValueError,
+                           match='requires explicit Kubernetes placement'):
+            backend._check_existing_cluster(task, None, 'existing')
+    else:
+        result = backend._check_existing_cluster(task, None, 'existing')
+        assert result.resources.cloud.is_same_cloud(clouds.AWS())
+        assert result.resources.cluster_config_overrides == {}
+
+
 @pytest.mark.parametrize('api_version', [None, 24, 64])
 @pytest.mark.parametrize('operation', ['validate', 'optimize'])
 def test_task_namespace_rejected_before_old_server_request(

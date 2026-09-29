@@ -1765,9 +1765,18 @@ but must match the effective workspace or per-context namespace when one is set:
 
 .. code-block:: yaml
 
+  resources:
+    infra: k8s/my-context
   config:
     kubernetes:
       namespace: my-namespace
+
+This binding requires an explicit Kubernetes cloud and concrete context
+(``infra: k8s/<context>``, or ``cloud: kubernetes`` with ``region: <context>``).
+Cloudless, contextless, wildcard, SSH, and other-cloud selections are rejected
+before submission. Specify the context so namespace policy is evaluated against
+the final destination, including when reusing a cluster. Tasks without a namespace
+binding keep their existing placement behavior.
 
 When an admin policy is configured, any effective namespace in its returned
 config is authoritative, including an unchanged global namespace. A conflicting

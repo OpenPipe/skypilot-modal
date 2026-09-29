@@ -201,12 +201,14 @@ def test_task_namespace_admin_policy_config(policy_namespace, requested,
 @pytest.mark.parametrize('operation',
                          ['jobs_launch', 'serve_up', 'serve_update'])
 @pytest.mark.parametrize('policy_namespace', ['ambient', 'pinned'])
+@pytest.mark.parametrize('context', ['ctx', None])
 def test_namespace_policy_admission_jobs_and_services(operation,
-                                                      policy_namespace,
+                                                      policy_namespace, context,
                                                       monkeypatch):
     """Real entrypoints must reject before config is sent to a controller."""
     task = sky.Task().set_resources(
-        sky.Resources(infra='k8s/ctx',
+        sky.Resources(cloud=sky.Kubernetes(),
+                      region=context,
                       _cluster_config_overrides={
                           'kubernetes': {
                               'namespace': 'requested'
@@ -250,8 +252,11 @@ def test_namespace_policy_admission_jobs_and_services(operation,
         }
     })
     with skypilot_config.replace_skypilot_config_in_process(config):
-        with pytest.raises(exceptions.UserRequestRejectedByPolicy,
-                           match='conflicts with admin policy namespace'):
+        error = (exceptions.UserRequestRejectedByPolicy
+                 if context else ValueError)
+        message = ('conflicts with admin policy namespace'
+                   if context else 'requires a concrete Kubernetes context')
+        with pytest.raises(error, match=message):
             if operation == 'jobs_launch':
                 inspect.unwrap(jobs_core.launch)(task)
             elif operation == 'serve_up':
@@ -283,11 +288,122 @@ def test_shared_apply_rejects_scoped_or_ssh_namespace_without_policy(infra):
     with skypilot_config.replace_skypilot_config_in_process(config):
         with pytest.raises(
                 ValueError,
-                match='conflicts with configured namespace|requires Kubernetes'
+                match=
+                'conflicts with configured namespace|requires explicit Kubernetes'
         ):
             admin_policy_utils.apply(
                 task,
                 request_name=request_names.AdminPolicyRequestName.VALIDATE)
+
+
+@pytest.mark.parametrize('resources,supported', [
+    ({}, False),
+    ({
+        'infra': 'k8s'
+    }, False),
+    ({
+        'infra': 'k8s/*'
+    }, False),
+    ({
+        'infra': 'aws/us-east-1'
+    }, False),
+    ({
+        'infra': 'ssh/pool'
+    }, False),
+    ({
+        'cloud': 'kubernetes',
+        'region': 'ctx*'
+    }, False),
+    ({
+        'infra': 'k8s/ctx'
+    }, True),
+    ({
+        'infra': 'kubernetes/ctx'
+    }, True),
+    ({
+        'infra': 'K8S/ctx/'
+    }, True),
+    ({
+        'cloud': 'kubernetes',
+        'region': 'ctx'
+    }, True),
+])
+@pytest.mark.parametrize('namespace', [None, 'models'])
+def test_task_namespace_requires_concrete_kubernetes_placement(
+        resources, supported, namespace):
+    task = sky.Task.from_yaml_config({
+        'resources': resources,
+        'config': {} if namespace is None else {
+            'kubernetes': {
+                'namespace': namespace
+            }
+        },
+    })
+    with skypilot_config.replace_skypilot_config_in_process(
+            config_utils.Config()):
+        if namespace and not supported:
+            with pytest.raises(
+                    ValueError,
+                    match='Task kubernetes.namespace requires.*k8s/<context>'):
+                admin_policy_utils.apply(
+                    task, request_names.AdminPolicyRequestName.VALIDATE)
+        else:
+            dag, _ = admin_policy_utils.apply(
+                task, request_names.AdminPolicyRequestName.VALIDATE)
+            assert dag.tasks[0] is task
+
+
+@pytest.mark.parametrize('has_policy', [False, True])
+@pytest.mark.parametrize('context', [None, 'ctx', 'other'])
+def test_namespace_admission_requires_context_before_resolving_fallback(
+        context, has_policy, monkeypatch):
+    config = config_utils.Config({
+        'active_workspace': 'team',
+        'workspaces': {
+            'team': {
+                'kubernetes': {
+                    'namespace': 'workspace-fallback',
+                    'context_configs': {
+                        'ctx': {
+                            'namespace': 'models'
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if has_policy:
+        config['admin_policy'] = 'fixture.Policy'
+
+    class UnchangedPolicy(sky.admin_policy.AdminPolicy):
+
+        @classmethod
+        def validate_and_mutate(cls, user_request):
+            return sky.admin_policy.MutatedUserRequest(
+                user_request.task, user_request.skypilot_config)
+
+    monkeypatch.setattr(
+        admin_policy_utils, '_get_policy_impl',
+        lambda location: UnchangedPolicy() if location else None)
+    task = sky.Task().set_resources(
+        sky.Resources(
+            cloud=sky.Kubernetes(),
+            region=context,
+            _cluster_config_overrides={'kubernetes': {
+                'namespace': 'models'
+            }}))
+    with skypilot_config.replace_skypilot_config_in_process(config):
+        if context == 'ctx':
+            dag, _ = admin_policy_utils.apply(
+                task, request_names.AdminPolicyRequestName.VALIDATE)
+            assert next(iter(dag.tasks[0].resources)).region == 'ctx'
+        else:
+            message = (
+                'concrete Kubernetes context' if context is None else
+                "conflicts with configured namespace 'workspace-fallback'")
+            with pytest.raises(ValueError, match=message):
+                admin_policy_utils.apply(
+                    task, request_names.AdminPolicyRequestName.VALIDATE)
 
 
 def test_task_namespace_without_policy_overrides_global_default():

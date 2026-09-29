@@ -1403,8 +1403,9 @@ def get_effective_namespace(
         override_configs: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Returns the effective Kubernetes namespace from config.
 
-    An explicit task-level ``kubernetes.namespace`` binds the destination,
-    but cannot conflict with a workspace/context namespace. Without it:
+    An explicit task-level ``kubernetes.namespace`` requires a concrete
+    Kubernetes context and cannot conflict with its scoped namespace.
+    Without it:
 
     1. ``workspaces.<workspace>.<cloud>.context_configs.<region>.namespace``
     2. ``workspaces.<workspace>.<cloud>.namespace``
@@ -1418,8 +1419,14 @@ def get_effective_namespace(
         if namespace is not None:
             if cloud != 'kubernetes':
                 raise ValueError(
-                    'Task kubernetes.namespace requires Kubernetes '
-                    'placement; SSH node pools are unsupported.')
+                    'Task kubernetes.namespace requires explicit Kubernetes '
+                    f'placement, not {cloud!r}. Set resources.infra to '
+                    'k8s/<context>.')
+            if region is None or not region.strip() or '*' in region:
+                raise ValueError(
+                    'Task kubernetes.namespace requires a concrete Kubernetes '
+                    'context. Set resources.infra to k8s/<context>; '
+                    'unspecified and wildcard contexts are unsupported.')
             active_workspace = (get_active_workspace()
                                 if workspace is None else workspace)
             prefixes = _region_scope_prefixes(cloud, region)
