@@ -19,6 +19,7 @@ from sky.provision import common as provision_common
 from sky.provision.runpod import instance
 from sky.provision.runpod.api import commands
 from sky.resources import Resources
+from sky.utils import accelerator_registry
 from sky.utils import common_utils
 from sky.utils import config_utils
 from sky.utils import resources_utils
@@ -73,6 +74,7 @@ def _render(tmp_path,
                           image_id='docker:example/pinned:cuda13')
     resources = resources.copy(_cluster_config_overrides=overrides)
     resources, = Resources.from_yaml_config(resources.to_yaml_config())
+    resources.validate()
     assert resources.cluster_config_overrides == overrides
     if cpu_only:
         resources = resources.copy(instance_type='cpu3c-2-4', accelerators=None)
@@ -362,11 +364,18 @@ def _host_quote(**overrides):
 
 
 @pytest.mark.parametrize('offer_cpu,offer_gb', [(20, 251), (24, 377)])
+@pytest.mark.parametrize('accelerators', ['H200-SXM:1', 'H200:1'])
 def test_stronger_singleton_survives_yaml_and_actual_sdk(
-        tmp_path, monkeypatch, offline, offer_cpu, offer_gb):
+        tmp_path, monkeypatch, offline, offer_cpu, offer_gb, accelerators):
     sdk = pytest.importorskip('runpod')
     ctl = importlib.import_module('runpod.api.ctl_commands')
     catalog = importlib.import_module('sky.catalog.runpod_catalog')
+    monkeypatch.setattr(
+        accelerator_registry, '_accelerator_df',
+        pd.DataFrame({
+            'AcceleratorName': ['H200', 'H200-SXM'],
+            'Clouds': ['AWS,GCP', 'RunPod']
+        }))
     _singleton(offline)
     before = offline.copy(deep=True)
     quote = _host_quote()
@@ -384,7 +393,7 @@ def test_stronger_singleton_survives_yaml_and_actual_sdk(
                 }
             }
         }))
-    config = _render(tmp_path, memory='192+', accelerators='H200-SXM:1')
+    config = _render(tmp_path, memory='192+', accelerators=accelerators)
     assert config.node_config['InstanceType'] == '1x_H200-SXM_SECURE'
     assert config.node_config['MinVCPUCount'] == 16
     assert config.node_config['MinMemoryInGB'] == 207
