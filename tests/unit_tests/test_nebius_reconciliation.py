@@ -59,12 +59,30 @@ def test_list_retains_reconciliation_across_pages(provider):
                for call in service.list.call_args_list)
 
 
+def test_sdk_status_serialization_retains_reconciliation(provider):
+    compute = pytest.importorskip('nebius.api.nebius.compute.v1')
+    common = pytest.importorskip('nebius.api.nebius.common.v1')
+    original = compute.Instance(
+        metadata=common.ResourceMetadata(id='cluster-head',
+                                         name='cluster-head'),
+        status=compute.InstanceStatus(
+            state=compute.InstanceStatus.InstanceState.STOPPED,
+            reconciling=True))
+    restored = compute.Instance.FromString(original.SerializeToString())
+    provider[0].list.return_value = SimpleNamespace(items=[restored],
+                                                    next_page_token='')
+    result = utils.list_instances('project')
+    assert result['cluster-head']['status'] == 'STOPPED'
+    assert result['cluster-head']['reconciling'] is True
+
+
 def test_starting_stopped_reconciling_running(provider):
-    _states(provider, ('STARTING', True), ('STOPPED', True), ('RUNNING', False))
+    _states(provider, ('STARTING', True), ('STOPPED', True), ('STOPPED', True),
+            ('RUNNING', False))
     instance.wait_instances('region', 'cluster', status_lib.ClusterStatus.UP)
     service, sleep = provider
-    assert service.list.call_count == 3
-    assert sleep.call_args_list == [mock.call(utils.POLL_INTERVAL)] * 2
+    assert service.list.call_count == 4
+    assert sleep.call_args_list == [mock.call(utils.POLL_INTERVAL)] * 3
 
 
 @pytest.mark.parametrize('state',
