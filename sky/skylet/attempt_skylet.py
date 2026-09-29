@@ -239,9 +239,8 @@ def main() -> None:
     elif not version_match:
         print(f'Skylet is stale{version_string}. Restarting...')
     else:
-        print(
-            f'Skylet is running with the latest version {constants.SKYLET_VERSION}.'
-        )
+        print('Skylet is running with the latest version '
+              f'{constants.SKYLET_VERSION}.')
 
     if not running or not version_match:
         restart_skylet()
