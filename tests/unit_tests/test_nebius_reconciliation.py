@@ -20,8 +20,8 @@ def _instance(state, reconciling, name='cluster-head'):
                            spec=SimpleNamespace(network_interfaces=[]))
 
 
-@pytest.fixture
-def provider(monkeypatch):
+@pytest.fixture(name='provider')
+def mock_provider(monkeypatch):
     service = mock.Mock()
     compute = SimpleNamespace(InstanceServiceClient=lambda _: service,
                               ListInstancesRequest=SimpleNamespace)
@@ -157,10 +157,12 @@ def test_empty_and_foreign_instances_remain_outside_cluster(provider):
     service, sleep = provider
     service.list.return_value = SimpleNamespace(
         items=[_instance('STOPPED', True, 'other-head')], next_page_token='')
-    assert instance._wait_until_no_pending('region', 'cluster', 'project') == {}
+    observed = instance._wait_until_no_pending('region', 'cluster', 'project')
+    assert isinstance(observed, dict) and not observed
     sleep.assert_not_called()
     service.list.return_value = SimpleNamespace(items=[], next_page_token='')
     # Preserve existing absent-cluster semantics; this helper has no expected
     # instance IDs/count. Later cluster-info validation owns that contract.
-    assert instance._wait_until_no_pending('region', 'cluster', 'project') == {}
+    observed = instance._wait_until_no_pending('region', 'cluster', 'project')
+    assert isinstance(observed, dict) and not observed
     sleep.assert_not_called()

@@ -65,7 +65,7 @@ def _wait_until_no_pending(region: str, cluster_name_on_cloud: str,
                                       cluster_name_on_cloud,
                                       None,
                                       project_id=project_id)
-        # State alone is not terminal while the provider reconciles an operation:
+        # State alone is not terminal while the provider reconciles an operation.
         # a newly created instance can report STOPPED with reconciling=True.
         pending = [
             inst for inst in instances.values()
