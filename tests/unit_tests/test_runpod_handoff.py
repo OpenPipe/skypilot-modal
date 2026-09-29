@@ -12,8 +12,11 @@ import requests
 import yaml
 
 from sky import clouds
+from sky import exceptions
 from sky import skypilot_config
+from sky import task as task_lib
 from sky.adaptors import runpod as adaptor
+from sky.backends import cloud_vm_ray_backend
 from sky.catalog import common as catalog_common
 from sky.provision import common as provision_common
 from sky.provision.runpod import instance
@@ -481,8 +484,61 @@ def test_quote_loss_before_render_never_creates_pod(tmp_path, monkeypatch,
     _singleton(offline)
     monkeypatch.setattr(adaptor, 'get_gpu_host_quote',
                         mock.Mock(side_effect=[_host_quote(), None]))
-    with pytest.raises(ValueError, match='No current RunPod host quote'):
+    with pytest.raises(exceptions.ResourcesUnavailableError,
+                       match='No current RunPod host quote'):
         _render(tmp_path, memory='192+', accelerators='H200-SXM:1')
+
+
+@pytest.mark.parametrize('quote', [None, {'uninterruptablePrice': 5.0}])
+def test_render_quote_rejection_uses_actual_capacity_fallback(
+        tmp_path, monkeypatch, offline, quote):
+    _singleton(offline)
+    rejected = None if quote is None else _host_quote() | quote
+    lookup = mock.Mock(side_effect=[_host_quote(), rejected])
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    request = Resources(cloud=clouds.RunPod(),
+                        cpus='16+',
+                        memory='192+',
+                        accelerators='H200-SXM:1',
+                        region='US',
+                        max_hourly_cost=4.59,
+                        image_id='docker:example/pinned:cuda13')
+    selected, = request.cloud._get_feasible_launchable_resources(
+        request).resources_list
+    provisioner = cloud_vm_ray_backend.RetryingVmProvisioner(
+        str(tmp_path),
+        None,
+        None,
+        set(),
+        tmp_path / 'unused.whl',
+        'unused',
+        extra_launch_context={})
+    created = mock.Mock(side_effect=AssertionError('rejected quote allocated'))
+    monkeypatch.setattr(cloud_vm_ray_backend.provisioner, 'bulk_provision',
+                        created)
+    monkeypatch.setattr(cloud_vm_ray_backend.rich_utils, 'force_update_status',
+                        lambda *args, **kwargs: None)
+    task = task_lib.Task().set_resources(request)
+    # Real Resources -> write_cluster_config -> RunPod renderer, caught by the
+    # real zone loop. No cloud call or state publication should be reached.
+    with pytest.raises(exceptions.ResourcesUnavailableError,
+                       match='Failed to acquire resources') as caught:
+        provisioner._retry_zones(selected,
+                                 1, {request},
+                                 dryrun=True,
+                                 stream_logs=False,
+                                 cluster_name='offline-quote-rejection',
+                                 cloud_user_identity=None,
+                                 prev_cluster_status=None,
+                                 prev_handle=None,
+                                 prev_cluster_ever_up=False,
+                                 skip_if_config_hash_matches=None,
+                                 volume_mounts=None,
+                                 task=task)
+    assert not caught.value.no_failover
+    assert lookup.call_count == 2
+    created.assert_not_called()
+    assert not list(tmp_path.iterdir())
 
 
 def test_restored_sized_instance_requires_current_offer(monkeypatch, offline):
