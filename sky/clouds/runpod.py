@@ -253,7 +253,9 @@ class RunPod(clouds.Cloud):
                     default_value=None,
                     override_configs=resources.cluster_config_overrides),
             }
-            if not math.isfinite(hourly_cost):
+            if (not math.isfinite(hourly_cost) or
+                (resources.max_hourly_cost is not None and
+                 hourly_cost > resources.max_hourly_cost)):
                 raise ValueError('No current RunPod host quote meets the '
                                  'selected CPU and memory minima.')
             # The sized catalog identity retains minima; the provider accepts
@@ -278,6 +280,11 @@ class RunPod(clouds.Cloud):
         """Returns a list of feasible resources for the given resources."""
         if resources.instance_type is not None:
             assert resources.is_launchable(), resources
+            if '--' in resources.instance_type and not math.isfinite(
+                    self.instance_type_to_hourly_cost(resources.instance_type,
+                                                      resources.use_spot,
+                                                      resources.region)):
+                return resources_utils.FeasibleResources([], [], None)
             resources = resources.copy(accelerators=None)
             return resources_utils.FeasibleResources([resources], [], None)
 

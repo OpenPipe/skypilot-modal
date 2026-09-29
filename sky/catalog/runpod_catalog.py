@@ -39,10 +39,14 @@ def _sized(instance_type: str) -> Tuple[str, Optional[int], Optional[int]]:
 
 def _quote_price(instance_type: str, cpus: int, memory_gb: int,
                  region: Optional[str]) -> float:
-    count, gpu, cloud_type = instance_type.split('_')
+    match = re.fullmatch(r'([1-9][0-9]*)x_([\w-]+)_(SECURE|COMMUNITY)',
+                         instance_type)
+    if match is None:
+        return math.inf
+    count, gpu, cloud_type = match.groups()
     if gpu not in runpod_utils.GPU_NAME_MAP:
         return math.inf
-    gpu_count = int(count[:-1])
+    gpu_count = int(count)
     quote = runpod.get_gpu_host_quote(runpod_utils.GPU_NAME_MAP[gpu], gpu_count,
                                       cloud_type == 'SECURE', cpus, memory_gb,
                                       region)

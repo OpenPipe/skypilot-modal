@@ -483,6 +483,15 @@ def test_quote_loss_before_render_never_creates_pod(tmp_path, monkeypatch,
         _render(tmp_path, memory='192+', accelerators='H200-SXM:1')
 
 
+def test_restored_sized_instance_requires_current_offer(monkeypatch, offline):
+    _singleton(offline)
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lambda *args: None)
+    resources = Resources(cloud=clouds.RunPod(),
+                          instance_type='1x_H200-SXM_SECURE--16vcpu-207gb')
+    assert not clouds.RunPod()._get_feasible_launchable_resources(
+        resources).resources_list
+
+
 @pytest.mark.parametrize('kwargs', [
     dict(cpus='16'),
     dict(memory='192'),
