@@ -837,6 +837,7 @@ def write_cluster_config(
     Returns:
         Dict with the following keys:
         - 'ray': Path to the generated Ray yaml config file
+        - 'resources_vars': Rendered custom_resources label for runtime setup.
         - 'cluster_name': Name of the cluster
         - 'cluster_name_on_cloud': Name of the cluster as it appears in the
           cloud provider

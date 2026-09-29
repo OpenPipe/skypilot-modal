@@ -1035,8 +1035,6 @@ class RetryingVmProvisioner(object):
         - 'handle': The provisioned cluster handle.
         - 'provision_record': (Only if using the new skypilot provisioner) The
           record returned by provisioner.bulk_provision().
-        - 'resources_vars': (Only if using the new skypilot provisioner) The
-          resources variables given by make_deploy_resources_variables().
         """
         # Get log_path name
         log_path = os.path.join(self.log_dir, 'provision.log')
@@ -3670,7 +3668,7 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
             if config_dict['provisioning_skipped']:
                 # Skip further provisioning.
                 # In this case, we won't have certain fields in the config_dict
-                # ('handle', 'provision_record', 'resources_vars')
+                # ('handle', 'provision_record')
                 # We need to return the handle - but it should be the existing
                 # handle for the cluster.
                 handle = global_user_state.get_handle_from_cluster_name(
