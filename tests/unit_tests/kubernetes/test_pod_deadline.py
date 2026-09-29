@@ -1,6 +1,7 @@
 """Absolute deadlines must not slide when a Pod starts late."""
 # pylint: disable=protected-access,redefined-outer-name
 import datetime
+import json
 from unittest import mock
 
 from kubernetes import client
@@ -89,12 +90,16 @@ def test_replacement_uid_is_rejected_before_patch():
     api.assert_not_called()
 
 
-def test_api_conflict_is_not_reported_as_reconciled():
+@pytest.mark.parametrize('status', [409, 422])
+def test_api_conflict_retries_are_bounded(status):
     value = pod()
     deadlines = _pod_deadline.PodDeadlines([value])
     with mock.patch.object(_pod_deadline.kubernetes, 'core_api') as api:
         api.return_value.patch_namespaced_pod.side_effect = client.ApiException(
-            409)
+            status)
+        for _ in range(4):
+            with pytest.raises(_pod_deadline.RetryPatch):
+                deadlines.reconcile('ns', 'ctx', [value])
         with pytest.raises(client.ApiException):
             deadlines.reconcile('ns', 'ctx', [value])
 
@@ -115,7 +120,8 @@ def test_real_kubernetes_client_sends_identity_tests_as_json_patch(monkeypatch):
     }
 
 
-@pytest.mark.parametrize('raw', ['nan', 'inf', '-1', 'bad', '0', '149'])
+@pytest.mark.parametrize('raw',
+                         ['nan', 'inf', '-1', 'bad', '0', '149', 201, True])
 def test_invalid_or_expired_annotations_fail(raw):
     with pytest.raises(config_lib.KubernetesError):
         _pod_deadline.parse({_pod_deadline.ANNOTATION: raw})
@@ -136,6 +142,30 @@ def test_insufficient_grace_budget_fails_without_widening_lifetime():
     api.assert_not_called()
 
 
+def test_late_observation_cannot_spend_termination_grace(clock):
+    value = pod()
+    deadlines = _pod_deadline.PodDeadlines([value])
+    clock.return_value = 190
+    with mock.patch.object(_pod_deadline.kubernetes, 'core_api') as api:
+        with pytest.raises(config_lib.KubernetesError, match='wall time'):
+            deadlines.reconcile('ns', 'ctx', [value])
+    api.assert_not_called()
+
+
+def test_patch_latency_cannot_be_reported_as_grace_safe(clock):
+    value = pod()
+    deadlines = _pod_deadline.PodDeadlines([value])
+    with mock.patch.object(_pod_deadline.kubernetes, 'core_api') as api:
+
+        def delayed_patch(*args, **kwargs):
+            del args, kwargs
+            clock.return_value = 190
+
+        api.return_value.patch_namespaced_pod.side_effect = delayed_patch
+        with pytest.raises(config_lib.KubernetesError, match='wall time'):
+            deadlines.reconcile('ns', 'ctx', [value])
+
+
 def test_no_annotation_leaves_existing_pods_unchanged():
     value = pod()
     value.metadata.annotations = {}
@@ -146,8 +176,9 @@ def test_no_annotation_leaves_existing_pods_unchanged():
 
 
 @pytest.mark.parametrize('phase', ['schedule', 'run'])
+@pytest.mark.parametrize('conflict', [None, 409, 422])
 def test_provision_poll_tightens_original_pod_before_returning(
-        phase, monkeypatch):
+        phase, conflict, monkeypatch):
     original = pod(start=None)
     observed = pod()
     for value in (original, observed):
@@ -156,7 +187,12 @@ def test_provision_poll_tightens_original_pod_before_returning(
         value.status.phase = 'Running'
     api = mock.MagicMock()
     api.list_namespaced_pod.return_value.items = [observed]
+    if conflict is not None:
+        api.patch_namespaced_pod.side_effect = [
+            client.ApiException(conflict), None
+        ]
     monkeypatch.setattr(instance.kubernetes, 'core_api', lambda _: api)
+    monkeypatch.setattr(instance.time, 'sleep', lambda _: None)
     monkeypatch.setattr(instance.skypilot_config, 'get_effective_region_config',
                         lambda **kwargs: kwargs['default_value'])
     monkeypatch.setattr(instance.subprocess_utils, 'run_in_parallel',
@@ -174,10 +210,12 @@ def test_provision_poll_tightens_original_pod_before_returning(
     patch = api.patch_namespaced_pod.call_args.kwargs['body']
     assert patch[-1]['value'] == 30
     assert patch[0]['value'] == original.metadata.uid
+    assert api.list_namespaced_pod.call_count == (1 if conflict is None else 2)
 
 
-def test_expired_annotation_rejects_before_provider_or_state_mutation(
-        monkeypatch):
+@pytest.mark.parametrize('reason', ['expired', 'high availability'])
+def test_annotation_rejects_before_provider_or_state_mutation(
+        monkeypatch, reason):
     config = provision_common.ProvisionConfig(
         provider_config={},
         authentication_config={},
@@ -185,7 +223,8 @@ def test_expired_annotation_rejects_before_provider_or_state_mutation(
         node_config={
             'metadata': {
                 'annotations': {
-                    _pod_deadline.ANNOTATION: '149'
+                    _pod_deadline.ANNOTATION: '149' if reason == 'expired' else
+                                              '200.75'
                 }
             }
         },
@@ -193,6 +232,8 @@ def test_expired_annotation_rejects_before_provider_or_state_mutation(
         tags={},
         resume_stopped_nodes=False,
         ports_to_open_on_launch=None)
+    if reason == 'high availability':
+        config.node_config['deployment_spec'] = {}
     monkeypatch.setattr(instance.kubernetes_utils, 'get_namespace_from_config',
                         lambda _: 'ns')
     monkeypatch.setattr(instance.kubernetes_utils,
@@ -200,7 +241,7 @@ def test_expired_annotation_rejects_before_provider_or_state_mutation(
     with mock.patch.object(instance.kubernetes, 'core_api') as api, \
             mock.patch.object(instance.global_user_state,
                               'record_launch_milestone_for_cluster') as record:
-        with pytest.raises(config_lib.KubernetesError, match='expired'):
+        with pytest.raises(config_lib.KubernetesError, match=reason):
             instance._create_pods('region', 'cluster', 'cluster', config)
     api.assert_not_called()
     record.assert_not_called()
@@ -213,3 +254,34 @@ def test_multiple_pods_require_each_original_identity():
         assert not deadlines.reconcile('ns', 'ctx', [first, second])
         second.status.start_time = first.status.start_time
         assert deadlines.reconcile('ns', 'ctx', [first, second])
+
+
+@pytest.mark.parametrize('retry', [False, True])
+def test_create_and_apparmor_retry_recheck_cutoff(clock, retry):
+    apparmor_key = 'container.apparmor.security.beta.kubernetes.io/ray-node'
+    spec = {
+        'metadata': {
+            'annotations': {
+                _pod_deadline.ANNOTATION: '200.75',
+                apparmor_key: 'unconfined'
+            }
+        }
+    }
+    _pod_deadline.parse(spec['metadata']['annotations'])
+    with mock.patch.object(instance.kubernetes, 'core_api') as api:
+        if retry:
+
+            def forbidden(*args, **kwargs):
+                del args, kwargs
+                clock.return_value = 210
+                error = client.ApiException(422)
+                error.body = json.dumps(
+                    {'message': 'FieldValueForbidden AppArmorProfile: nil'})
+                raise error
+
+            api.return_value.create_namespaced_pod.side_effect = forbidden
+        else:
+            clock.return_value = 210
+        with pytest.raises(config_lib.KubernetesError, match='expired'):
+            instance._create_namespaced_pod_with_retries('ns', spec, 'ctx')
+    assert api.return_value.create_namespaced_pod.call_count == int(retry)

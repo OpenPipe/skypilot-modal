@@ -1969,6 +1969,10 @@ tightens each newly created Pod's ``activeDeadlineSeconds`` after observing its
 when omitted). An existing shorter ``activeDeadlineSeconds`` is preserved.
 Expired or invalid deadlines fail provisioning, including while waiting for
 queue admission. Pods without this annotation are unchanged.
+High-availability deployments are unsupported and reject this annotation,
+because their controller could replace a terminated Pod after provisioning.
+Conflicting deadline patches are re-observed within the original time budget;
+five consecutive conflicts fail provisioning.
 
 This requires an API server containing the deadline implementation; older
 servers only pass the annotation through. It is a kubelet termination backstop,

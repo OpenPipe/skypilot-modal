@@ -1220,6 +1220,9 @@ def _wait_for_pods_to_schedule(namespace,
                 _request_timeout=_POD_POLL_REQUEST_TIMEOUT).items
             deadlines.reconcile(namespace, context, pods)
             transport_error_since = None
+        except _pod_deadline.RetryPatch:
+            time.sleep(0.5)
+            continue
         except (kubernetes.api_exception(),
                 kubernetes.urllib3_http_error()) as e:
             # Treat a transport failure as a missed poll and retry within
@@ -1355,6 +1358,7 @@ def _wait_for_pods_to_schedule(namespace,
         ]
 
         if not unscheduled_pods:
+            deadlines.check()
             return
 
         # Check if cluster is autoscaling and update spinner message.
@@ -1756,6 +1760,9 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
                 _request_timeout=_POD_POLL_REQUEST_TIMEOUT).items
             deadline_ready = deadlines.reconcile(namespace, context, all_pods)
             transport_error_since = None
+        except _pod_deadline.RetryPatch:
+            time.sleep(0.5)
+            continue
         except (kubernetes.api_exception(),
                 kubernetes.urllib3_http_error()) as e:
             # Same missed-poll treatment as in _wait_for_pods_to_schedule.
@@ -1860,6 +1867,7 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
                     _raise_stalled(pod_name, pending_reason)
 
         if all_pods_running:
+            deadlines.check()
             if not deadline_ready:
                 raise config_lib.KubernetesError(
                     'Pod start time is unavailable for its absolute deadline')
@@ -2137,11 +2145,15 @@ def _create_namespaced_pod_with_retries(namespace: str, pod_spec: dict,
 
     Returns: The created Pod object.
     """
+
+    def create() -> Any:
+        api = kubernetes.core_api(context)
+        _pod_deadline.parse(pod_spec.get('metadata', {}).get('annotations'))
+        return api.create_namespaced_pod(namespace, pod_spec)
+
     try:
         # Attempt to create the Pod with the AppArmor annotation
-        pod = kubernetes.core_api(context).create_namespaced_pod(
-            namespace, pod_spec)
-        return pod
+        return create()
     except kubernetes.api_exception() as e:
         try:
             error_body = json.loads(e.body)
@@ -2177,8 +2189,7 @@ def _create_namespaced_pod_with_retries(namespace: str, pod_spec: dict,
 
             # Retry Pod creation without the AppArmor annotation
             try:
-                pod = kubernetes.core_api(context).create_namespaced_pod(
-                    namespace, pod_spec)
+                pod = create()
                 logger.info(f'Pod {pod.metadata.name} created successfully '
                             'without AppArmor annotation.')
                 return pod
@@ -2216,10 +2227,10 @@ def _create_namespaced_pod_with_retries(namespace: str, pod_spec: dict,
                 'Force-removing it and retrying pod creation.')
             # Both the Kueue finalizer and the termination grace period can keep
             # the old object around; _force_remove_terminating_pod clears both.
+            _pod_deadline.parse(pod_spec.get('metadata', {}).get('annotations'))
             _force_remove_terminating_pod(pod_name, namespace, context)
             try:
-                pod = kubernetes.core_api(context).create_namespaced_pod(
-                    namespace, pod_spec)
+                pod = create()
                 logger.info(f'Pod {pod.metadata.name} created successfully '
                             'after force-removing the terminating pod.')
                 return pod
@@ -2322,7 +2333,11 @@ def _create_pods(region: str, cluster_name: str, cluster_name_on_cloud: str,
     namespace = kubernetes_utils.get_namespace_from_config(provider_config)
     context = kubernetes_utils.get_control_context_from_config(provider_config)
     pod_spec = copy.deepcopy(config.node_config)
-    _pod_deadline.parse(pod_spec.get('metadata', {}).get('annotations'))
+    deadline = _pod_deadline.parse(
+        pod_spec.get('metadata', {}).get('annotations'))
+    if deadline is not None and 'deployment_spec' in pod_spec:
+        raise config_lib.KubernetesError(
+            'Absolute Pod deadlines are unsupported for high availability')
     create_pods_start = datetime.datetime.now(datetime.timezone.utc)
     # Closes the provision-setup segment of this launch attempt and opens the
     # admission-wait one. The same reference point _wait_for_pods_to_schedule
