@@ -3,6 +3,7 @@
 # pylint: disable=protected-access
 import importlib
 import math
+from types import SimpleNamespace
 from unittest import mock
 
 import jsonschema
@@ -647,3 +648,78 @@ def test_constrained_quote_request_is_read_only_and_bounded(monkeypatch):
     adaptor.get_gpu_host_quote('NVIDIA H200', 1, True, 16, 207, 'US')
     assert post.call_count == 1
     adaptor.get_gpu_host_quote.cache_clear()
+
+
+@pytest.mark.parametrize('later_quote', [None, {'uninterruptablePrice': 5.0}])
+def test_successful_provision_uses_already_rendered_resources(
+        tmp_path, monkeypatch, offline, later_quote):
+    _singleton(offline)
+    lookup = mock.Mock(return_value=_host_quote())
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    request = Resources(cloud=clouds.RunPod(),
+                        cpus='16+',
+                        memory='192+',
+                        accelerators='H200-SXM:1',
+                        region='US',
+                        max_hourly_cost=4.59,
+                        image_id='docker:example/pinned:cuda13')
+    selected, = request.cloud._get_feasible_launchable_resources(
+        request).resources_list
+    backend = cloud_vm_ray_backend
+    monkeypatch.setattr(backend.backend_utils,
+                        '_get_yaml_path_from_cluster_name',
+                        lambda *args: str(tmp_path / 'rendered.yaml'))
+    monkeypatch.setattr(backend.backend_utils.sky_check,
+                        'get_cloud_credential_file_mounts',
+                        lambda *args, **kwargs: {})
+    monkeypatch.setattr(backend.backend_utils, '_add_auth_to_cluster_config',
+                        lambda *args: None)
+    monkeypatch.setattr(backend.backend_utils, '_optimize_file_mounts',
+                        lambda *args: None)
+    monkeypatch.setattr(backend.global_user_state, 'get_cluster_yaml_str',
+                        lambda *args: None)
+    for name in ('set_cluster_yaml', 'add_or_update_cluster',
+                 'add_cluster_event', 'set_owner_identity_for_cluster'):
+        monkeypatch.setattr(backend.global_user_state, name,
+                            lambda *args, **kwargs: None)
+    monkeypatch.setattr(backend, 'CloudVmRayResourceHandle', SimpleNamespace)
+    monkeypatch.setattr(backend.rich_utils, 'force_update_status',
+                        lambda *args, **kwargs: None)
+    record = mock.sentinel.provision_record
+
+    def allocated(*_args, **_kwargs):
+        lookup.return_value = None if later_quote is None else _host_quote(
+        ) | later_quote
+        return record
+
+    created = mock.Mock(side_effect=allocated)
+    monkeypatch.setattr(backend.provisioner, 'bulk_provision', created)
+    cleanup = mock.Mock()
+    monkeypatch.setattr(backend.CloudVmRayBackend, 'post_teardown_cleanup',
+                        cleanup)
+    provisioner = backend.RetryingVmProvisioner(str(tmp_path),
+                                                None,
+                                                None,
+                                                set(),
+                                                tmp_path / 'unused.whl',
+                                                'unused',
+                                                extra_launch_context={})
+    result = provisioner._retry_zones(
+        selected,
+        1, {request},
+        dryrun=False,
+        stream_logs=False,
+        cluster_name='offline-quote-after-create',
+        cloud_user_identity=None,
+        prev_cluster_status=None,
+        prev_handle=None,
+        prev_cluster_ever_up=False,
+        skip_if_config_hash_matches=None,
+        volume_mounts=None,
+        task=task_lib.Task().set_resources(request))
+    assert result['provision_record'] is record
+    assert result['resources_vars'] == {'custom_resources': '{"H200-SXM":1}'}
+    # Selection and pre-allocation rendering only.
+    assert lookup.call_count == 2
+    created.assert_called_once()
+    cleanup.assert_not_called()

@@ -1326,14 +1326,7 @@ class RetryingVmProvisioner(object):
                         # NOTE: We will handle the logic of '_ensure_cluster_ray_started'
                         # in 'provision_utils.post_provision_runtime_setup()' in the
                         # caller.
-                        resources_vars = (
-                            to_provision.cloud.make_deploy_resources_variables(
-                                to_provision,
-                                resources_utils.ClusterName(
-                                    cluster_name, handle.cluster_name_on_cloud),
-                                region, zones, num_nodes))
                         config_dict['provision_record'] = provision_record
-                        config_dict['resources_vars'] = resources_vars
                         config_dict['handle'] = handle
                         return config_dict
                     except provision_common.StopFailoverError:
