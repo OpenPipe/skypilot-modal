@@ -555,7 +555,7 @@ def test_task_namespace_reaches_pod_creation(source, monkeypatch, tmp_path):
                     'namespace': 'workspace',
                     'context_configs': {
                         'test-context': {
-                            'namespace': 'workspace-context'
+                            'namespace': expected_namespace
                         }
                     },
                 }

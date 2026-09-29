@@ -1818,9 +1818,42 @@ def test_get_effective_namespace_no_config(monkeypatch, tmp_path) -> None:
                                                    workspace='default') is None
 
 
+@pytest.mark.parametrize('scope', [
+    ('kubernetes', 'context_configs', 'ctx'),
+    ('workspaces', 'team', 'kubernetes'),
+    ('workspaces', 'team', 'kubernetes', 'context_configs', 'ctx'),
+])
+@pytest.mark.parametrize('requested', ['pinned', 'different'])
+def test_task_namespace_respects_scoped_constraint(scope, requested,
+                                                   monkeypatch):
+    config = config_utils.Config({'kubernetes': {'namespace': 'ambient'}})
+    config.set_nested(scope + ('namespace',), 'pinned')
+    monkeypatch.setattr(skypilot_config, '_get_loaded_config', lambda: config)
+    overrides = {'kubernetes': {'namespace': requested}}
+    if requested != 'pinned':
+        with pytest.raises(ValueError,
+                           match='conflicts with configured namespace'):
+            skypilot_config.get_effective_namespace('kubernetes', 'ctx', 'team',
+                                                    overrides)
+    else:
+        assert skypilot_config.get_effective_namespace('kubernetes', 'ctx',
+                                                       'team',
+                                                       overrides) == requested
+
+
+def test_task_kubernetes_namespace_rejects_ssh_pool():
+    with pytest.raises(ValueError, match='SSH node pools are unsupported'):
+        skypilot_config.get_effective_namespace(
+            'ssh',
+            'ssh-pool',
+            override_configs={'kubernetes': {
+                'namespace': 'models'
+            }})
+
+
 def test_get_effective_namespace_override_configs(monkeypatch,
                                                   tmp_path) -> None:
-    """An explicit task namespace overrides workspace/context defaults."""
+    """Task namespaces override ambient defaults, but respect scoped pins."""
     with open(tmp_path / 'override.yaml', 'w', encoding='utf-8') as f:
         f.write("""\
         kubernetes:
@@ -1844,12 +1877,21 @@ def test_get_effective_namespace_override_configs(monkeypatch,
         workspace='default',
         override_configs=cloud_level_override) == 'override-namespace'
 
-    # Task namespace binds the destination even with a workspace context.
+    with pytest.raises(ValueError, match='conflicts with configured namespace'):
+        skypilot_config.get_effective_namespace(
+            cloud='kubernetes',
+            region='contextA',
+            workspace='workspaceA',
+            override_configs=cloud_level_override)
     assert skypilot_config.get_effective_namespace(
         cloud='kubernetes',
         region='contextA',
         workspace='workspaceA',
-        override_configs=cloud_level_override) == 'override-namespace'
+        override_configs={
+            'kubernetes': {
+                'namespace': 'workspaceA-contextA-namespace'
+            }
+        }) == 'workspaceA-contextA-namespace'
 
     # Override applies for an unknown workspace (falls through to global).
     assert skypilot_config.get_effective_namespace(

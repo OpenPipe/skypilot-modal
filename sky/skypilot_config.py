@@ -1404,7 +1404,7 @@ def get_effective_namespace(
     """Returns the effective Kubernetes namespace from config.
 
     An explicit task-level ``kubernetes.namespace`` binds the destination,
-    overriding workspace/context defaults. Without it, resolution precedence:
+    but cannot conflict with a workspace/context namespace. Without it:
 
     1. ``workspaces.<workspace>.<cloud>.context_configs.<region>.namespace``
     2. ``workspaces.<workspace>.<cloud>.namespace``
@@ -1412,10 +1412,32 @@ def get_effective_namespace(
     4. ``<cloud>.namespace``
     5. ``None`` — caller is responsible for the kubeconfig-default fallback.
     """
-    if cloud == 'kubernetes' and override_configs is not None:
+    if override_configs is not None:
         namespace = config_utils.Config(override_configs).get_nested(
             ('kubernetes', 'namespace'), None)
         if namespace is not None:
+            if cloud != 'kubernetes':
+                raise ValueError(
+                    'Task kubernetes.namespace requires Kubernetes '
+                    'placement; SSH node pools are unsupported.')
+            active_workspace = (get_active_workspace()
+                                if workspace is None else workspace)
+            prefixes = _region_scope_prefixes(cloud, region)
+            scopes = [
+                ('workspaces', active_workspace) + prefix for prefix in prefixes
+            ] if active_workspace else []
+            # A global cloud-level namespace is an ambient default; scoped
+            # namespaces are constraints and must not be silently bypassed.
+            scopes.extend(prefixes[:-1])
+            for prefix in scopes:
+                pinned = get_nested(prefix + ('namespace',), None)
+                if pinned is not None:
+                    if namespace != pinned:
+                        raise ValueError(
+                            f'Task Kubernetes namespace {namespace!r} '
+                            f'conflicts with configured namespace {pinned!r} '
+                            f'at {".".join(prefix)}.namespace.')
+                    break
             return namespace
     return _get_effective_scoped_config_value(cloud=cloud,
                                               property_keys=_NAMESPACE_KEYS,

@@ -122,6 +122,78 @@ def test_add_labels_policy(add_example_policy_paths, task):
             {}), ('label should be set')
 
 
+@pytest.mark.parametrize('policy_namespace', ['pinned', 'ambient', None])
+@pytest.mark.parametrize('requested', ['pinned', 'ambient', None])
+def test_task_namespace_admin_policy_config(policy_namespace, requested,
+                                            monkeypatch):
+    config = config_utils.Config({
+        'admin_policy': 'fixture.Policy',
+        'kubernetes': {
+            'namespace': 'ambient'
+        },
+    })
+    overrides = {} if requested is None else {
+        'kubernetes': {
+            'namespace': requested
+        }
+    }
+    task = sky.Task().set_resources(
+        sky.Resources(infra='k8s/ctx', _cluster_config_overrides=overrides))
+
+    class NamespacePolicy(sky.admin_policy.AdminPolicy):
+
+        @classmethod
+        def validate_and_mutate(cls, user_request):
+            result = copy.deepcopy(user_request.skypilot_config)
+            if policy_namespace is None:
+                result['kubernetes'].pop('namespace')
+            else:
+                result['kubernetes']['namespace'] = policy_namespace
+            return sky.admin_policy.MutatedUserRequest(user_request.task,
+                                                       result)
+
+    monkeypatch.setattr(admin_policy_utils, '_get_policy_impl',
+                        lambda *a: NamespacePolicy())
+    with skypilot_config.replace_skypilot_config(config):
+        manager = admin_policy_utils.apply_and_use_config_in_current_request(
+            task, request_name=request_names.AdminPolicyRequestName.VALIDATE)
+        if (requested is not None and policy_namespace is not None and
+                requested != policy_namespace):
+            with pytest.raises(exceptions.UserRequestRejectedByPolicy,
+                               match='conflicts with admin policy namespace'):
+                with manager:
+                    pytest.fail('conflicting task admitted')
+        else:
+            with manager as dag:
+                resource = next(iter(dag.tasks[0].resources))
+                assert skypilot_config.get_effective_namespace(
+                    'kubernetes',
+                    'ctx',
+                    override_configs=resource.cluster_config_overrides) == (
+                        requested or policy_namespace)
+
+
+def test_task_namespace_without_policy_overrides_global_default():
+    task = sky.Task().set_resources(
+        sky.Resources(
+            infra='k8s/ctx',
+            _cluster_config_overrides={'kubernetes': {
+                'namespace': 'models'
+            }}))
+    with skypilot_config.replace_skypilot_config(
+            config_utils.Config({'kubernetes': {
+                'namespace': 'ambient'
+            }})):
+        with admin_policy_utils.apply_and_use_config_in_current_request(
+                task,
+                request_name=request_names.AdminPolicyRequestName.VALIDATE):
+            assert skypilot_config.get_effective_namespace(
+                'kubernetes',
+                'ctx',
+                override_configs=next(iter(
+                    task.resources)).cluster_config_overrides) == 'models'
+
+
 def test_add_labels_conditional_policy(add_example_policy_paths, task):
     task = _load_task(task,
                       os.path.join(POLICY_PATH, 'add_labels_conditional.yaml'))

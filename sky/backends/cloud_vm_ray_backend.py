@@ -3298,6 +3298,18 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
 
         mismatch_str = (f'To fix: specify a new cluster name, or down the '
                         f'existing cluster first: sky down {cluster_name}')
+        namespace_bound = isinstance(
+            launched_resources.cloud, clouds.Kubernetes) and any(
+                resource.cluster_config_overrides.get('kubernetes', {}).get(
+                    'namespace') is not None for resource in task.resources)
+        actual_namespace = None
+        if namespace_bound:
+            cluster_yaml = global_user_state.get_cluster_yaml_str(cluster_name)
+            if cluster_yaml is not None:
+                actual_namespace = yaml_utils.safe_load(cluster_yaml).get(
+                    'provider', {}).get('namespace')
+            mismatch_str += (f' Existing Kubernetes namespace: '
+                             f'{actual_namespace!r}.')
         valid_resource = None
         requested_resource_list = []
         # For the validation comparison, optionally treat the node count as
@@ -3306,6 +3318,17 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         fit_num_nodes = (handle.launched_nodes
                          if skip_num_nodes_check else task.num_nodes)
         for resource in task.resources:
+            namespace = (resource.cluster_config_overrides.get(
+                'kubernetes', {}).get('namespace') if namespace_bound else None)
+            if namespace is not None:
+                skypilot_config.get_effective_namespace(
+                    repr(launched_resources.cloud).lower(),
+                    region=launched_resources.region,
+                    override_configs=resource.cluster_config_overrides)
+                if namespace != actual_namespace:
+                    requested_resource_list.append(
+                        f'{task.num_nodes}x {resource} namespace={namespace!r}')
+                    continue
             if (fit_num_nodes <= handle.launched_nodes and
                     resource.less_demanding_than(
                         launched_resources,

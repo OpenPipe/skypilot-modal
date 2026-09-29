@@ -22,6 +22,40 @@ from sky.utils import status_lib
 from sky.workspaces import constants as workspace_constants
 
 
+@pytest.mark.parametrize('requested,actual', [
+    ('models', 'models'),
+    ('models', 'other'),
+    ('models', None),
+    (None, 'other'),
+])
+def test_existing_cluster_task_namespace(requested, actual, monkeypatch):
+    launched = sky.Resources(infra='k8s/test-context')
+    handle = mock.Mock(cluster_name='existing',
+                       launched_resources=launched,
+                       launched_nodes=1)
+    config = {} if requested is None else {
+        'kubernetes': {
+            'namespace': requested
+        }
+    }
+    task = sky.Task().set_resources(
+        sky.Resources(infra='k8s/test-context',
+                      _cluster_config_overrides=config))
+    monkeypatch.setattr(global_user_state, 'get_status_from_cluster_name',
+                        lambda *a: None)
+    monkeypatch.setattr(
+        global_user_state, 'get_cluster_yaml_str',
+        lambda *a: f'provider:\n  namespace: {actual or "null"}')
+    backend = CloudVmRayBackend()
+    if requested is not None and requested != actual:
+        with pytest.raises(exceptions.ResourcesMismatchError,
+                           match='Existing Kubernetes namespace'):
+            backend.check_resources_fit_cluster(handle, task)
+    else:
+        assert backend.check_resources_fit_cluster(handle,
+                                                   task) in task.resources
+
+
 @pytest.mark.parametrize('api_version', [None, 24, 64])
 @pytest.mark.parametrize('operation', ['validate', 'optimize'])
 def test_task_namespace_rejected_before_old_server_request(

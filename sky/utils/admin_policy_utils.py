@@ -98,12 +98,32 @@ def apply_and_use_config_in_current_request(
     # actually mutated the config, not merely because `apply()` surfaced the
     # resolved active workspace.
     original_config = skypilot_config.resolved_config()
+    has_policy = original_config.get('admin_policy') is not None
     dag, mutated_config = apply(entrypoint, request_name, request_options,
                                 at_client_side)
-    if mutated_config != original_config:
-        with skypilot_config.replace_skypilot_config(mutated_config):
-            yield dag
-    else:
+    with contextlib.ExitStack() as stack:
+        if mutated_config != original_config:
+            stack.enter_context(
+                skypilot_config.replace_skypilot_config(mutated_config))
+        for task in dag.tasks:
+            for resource in task.resources:
+                namespace = resource.cluster_config_overrides.get(
+                    'kubernetes', {}).get('namespace')
+                if namespace is None:
+                    continue
+                # Policy-returned namespaces are authoritative even when the
+                # policy kept an existing value. A value comparison cannot
+                # distinguish an intentional pin from an unrelated mutation.
+                pinned = skypilot_config.get_effective_namespace(
+                    'kubernetes', region=resource.region)
+                if has_policy and pinned is not None and namespace != pinned:
+                    raise exceptions.UserRequestRejectedByPolicy(
+                        f'Task Kubernetes namespace {namespace!r} conflicts '
+                        f'with admin policy namespace {pinned!r}.')
+                skypilot_config.get_effective_namespace(
+                    'kubernetes',
+                    region=resource.region,
+                    override_configs=resource.cluster_config_overrides)
         yield dag
 
 

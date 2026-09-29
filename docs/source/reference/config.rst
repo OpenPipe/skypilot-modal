@@ -1760,8 +1760,8 @@ teams, with each team scoped to its own namespace — see
 :ref:`Workspaces <workspaces>`.
 
 With API server version 65 or newer, an explicit task namespace binds that
-task's Kubernetes destination, overriding global, workspace and per-context
-namespace defaults:
+task's Kubernetes destination. It may override a plain global namespace default,
+but must match the effective workspace or per-context namespace when one is set:
 
 .. code-block:: yaml
 
@@ -1769,13 +1769,23 @@ namespace defaults:
     kubernetes:
       namespace: my-namespace
 
+When an admin policy is configured, any effective namespace in its returned
+config is authoritative, including an unchanged global namespace. A conflicting
+task namespace is rejected. A policy can allow task selection by returning no
+namespace constraint. Requests without a task namespace keep the existing
+workspace/context precedence.
+
 The launch flag ``--config kubernetes.namespace=my-namespace`` has the same
-effect. New clients reject these task overrides on older servers; upgrade
-both client and server to use the binding. Global config alone retains its
-workspace/context precedence when there is no explicit task override.
+effect. This changes the flag from an ambient default to a binding request.
+New clients reject it on servers older than API 65, even when the older ambient
+flag previously worked; upgrade both client and server to use the binding.
 ``pod_config.metadata.namespace`` does not bind placement: pod creation uses
-the resolved provider namespace. Namespace binding does not move an existing
-cluster into a different namespace.
+the resolved provider namespace. Reusing an existing cluster rejects a task
+binding that differs from its recorded provider namespace, or whose existing
+namespace cannot be verified. Registered PVC volumes and auto-mounts must match
+the bound namespace; new ephemeral volumes inherit it. This does not move an
+existing cluster or PVC. Kubernetes task namespace binding is unsupported on
+SSH node pools and is rejected there.
 
 .. _config-yaml-kubernetes-allowed-nodes:
 
