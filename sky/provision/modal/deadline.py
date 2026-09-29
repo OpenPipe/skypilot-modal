@@ -9,7 +9,7 @@ TAG = 'skypilot-deadline'
 # The image always includes Python. Ending its entrypoint ends the Sandbox,
 # including setup, jobs and SSH sessions. Do not start a fresh relative timer
 # after Modal schedules a delayed container.
-_SUPERVISOR = '''\
+_SUPERVISOR = """\
 import os, signal, subprocess, sys, time
 
 def cancel(signum, frame):
@@ -32,7 +32,7 @@ finally:
     except ProcessLookupError:
         pass
 raise SystemExit(result)
-'''
+"""
 
 
 def validate(value: Optional[float]) -> Optional[float]:

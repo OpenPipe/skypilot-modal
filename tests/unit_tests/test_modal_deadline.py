@@ -1,5 +1,6 @@
 """Finite Modal lifetimes preserve admission time through delayed startup."""
 
+import inspect
 import pathlib
 import shlex
 import signal
@@ -14,11 +15,18 @@ import pytest
 import yaml
 
 from sky import clouds
+from sky import exceptions
+from sky import skypilot_config
 from sky import task
+from sky.client import sdk
 from sky.provision import common
 from sky.provision.modal import deadline
 from sky.provision.modal import instance
 from sky.provision.modal import modal_utils
+from sky.server import constants as server_constants
+from sky.server.requests import payloads
+from sky.utils import config_utils
+from sky.utils import dag_utils
 from sky.utils import resources_utils
 
 
@@ -234,3 +242,131 @@ def test_down_reconciles_accepted_but_not_ready_sandbox(provider):
     instance.terminate_instances('test-on-cloud', {'environment_name': 'test'})
     sandbox.terminate.assert_called_once_with(wait=True)
     create.assert_not_called()
+
+
+@pytest.mark.parametrize('api_version', [None, 24, 64, 65])
+@pytest.mark.parametrize('operation', ['validate', 'optimize', '_launch'])
+def test_deadline_rejected_before_old_peer_request(api_version, operation,
+                                                   monkeypatch):
+    dag = dag_utils.convert_entrypoint_to_dag(
+        task.Task.from_yaml_config({
+            'resources': {
+                'infra': 'modal'
+            },
+            'config': {
+                'modal': {
+                    'deadline': 2000000000.75
+                }
+            },
+        }))
+    monkeypatch.setattr(sdk.versions, 'get_remote_api_version',
+                        lambda: api_version)
+    request = mock.Mock(side_effect=AssertionError('unexpected API request'))
+    monkeypatch.setattr(sdk.server_common, 'make_authenticated_request',
+                        request)
+    validate = inspect.unwrap(sdk.validate)
+    monkeypatch.setattr(sdk, 'validate', validate)
+    args = (dag, 'deadline-test', None) if operation == '_launch' else (dag,)
+    with pytest.raises(exceptions.APINotSupportedError,
+                       match='Modal Sandbox deadlines.*API_VERSION'):
+        inspect.unwrap(getattr(sdk, operation))(*args)
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize('deadline_value', [None, 2000000000.75])
+def test_deadline_compatible_peer_and_unselected_feature(
+        deadline_value, monkeypatch):
+    config = {} if deadline_value is None else {
+        'modal': {
+            'deadline': deadline_value
+        }
+    }
+    dag = dag_utils.convert_entrypoint_to_dag(
+        task.Task.from_yaml_config({
+            'resources': {
+                'infra': 'modal'
+            },
+            'config': config
+        }))
+    monkeypatch.setattr(
+        sdk.versions, 'get_remote_api_version', lambda: None if deadline_value
+        is None else server_constants.MIN_MODAL_SANDBOX_DEADLINE_API_VERSION)
+    request = mock.Mock(side_effect=RuntimeError('supported server request'))
+    monkeypatch.setattr(sdk.server_common, 'make_authenticated_request',
+                        request)
+    with pytest.raises(RuntimeError, match='supported server request'):
+        inspect.unwrap(sdk.validate)(dag)
+    request.assert_called_once()
+
+
+def test_global_deadline_also_rejects_old_peer(monkeypatch):
+    dag = dag_utils.convert_entrypoint_to_dag(
+        task.Task.from_yaml_config({'resources': {
+            'infra': 'modal'
+        }}))
+    monkeypatch.setattr(sdk.versions, 'get_remote_api_version', lambda: 65)
+    request = mock.Mock(side_effect=AssertionError('unexpected API request'))
+    monkeypatch.setattr(sdk.server_common, 'make_authenticated_request',
+                        request)
+    with skypilot_config.replace_skypilot_config(
+            config_utils.Config({'modal': {
+                'deadline': 2000000000.75
+            }})):
+        with pytest.raises(exceptions.APINotSupportedError,
+                           match='Modal Sandbox deadlines'):
+            inspect.unwrap(sdk.validate)(dag)
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize('api_version', [None, 64, 65])
+@pytest.mark.parametrize(
+    'body_class',
+    [payloads.LaunchBody, payloads.ExecBody, payloads.OptimizeBody])
+def test_server_rejects_old_client_before_resource_work(api_version, body_class,
+                                                        monkeypatch):
+    raw = yaml.safe_dump({
+        'resources': {
+            'infra': 'modal'
+        },
+        'config': {
+            'modal': {
+                'deadline': 2000000000.75
+            }
+        }
+    })
+    if body_class is payloads.OptimizeBody:
+        body = body_class(dag=raw,
+                          request_options=None,
+                          client_api_version=api_version)
+    else:
+        body = body_class(task=raw,
+                          cluster_name='deadline-test',
+                          client_api_version=api_version)
+    mkdir = mock.Mock(side_effect=AssertionError('unexpected mount mutation'))
+    monkeypatch.setattr(pathlib.Path, 'mkdir', mkdir)
+    with pytest.raises(exceptions.APINotSupportedError,
+                       match='Modal Sandbox deadlines'):
+        body.to_kwargs()
+    mkdir.assert_not_called()
+
+
+def test_server_accepts_supported_client_before_provider(monkeypatch):
+    raw = yaml.safe_dump({
+        'resources': {
+            'infra': 'modal'
+        },
+        'config': {
+            'modal': {
+                'deadline': 2000000000.75
+            }
+        }
+    })
+    body = payloads.LaunchBody(task=raw,
+                               cluster_name='deadline-test',
+                               client_api_version=server_constants.
+                               MIN_MODAL_SANDBOX_DEADLINE_API_VERSION)
+    mkdir = mock.Mock(side_effect=RuntimeError('compatible mount preparation'))
+    monkeypatch.setattr(pathlib.Path, 'mkdir', mkdir)
+    with pytest.raises(RuntimeError, match='compatible mount preparation'):
+        body.to_kwargs()
+    mkdir.assert_called_once()
