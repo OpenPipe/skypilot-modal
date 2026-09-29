@@ -118,8 +118,8 @@ def _validate_task_namespaces(dag: 'dag_lib.Dag', config: config_utils.Config,
                     'kubernetes', {}).get('namespace')
                 if namespace is None:
                     continue
-                cloud = ('kubernetes' if resource.cloud is None else repr(
-                    resource.cloud).lower())
+                cloud = (repr(resource.cloud).lower()
+                         if resource.cloud is not None else 'unspecified')
                 skypilot_config.get_effective_namespace(
                     cloud,
                     region=resource.region,

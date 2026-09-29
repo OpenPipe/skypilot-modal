@@ -3320,9 +3320,13 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         fit_num_nodes = (handle.launched_nodes
                          if skip_num_nodes_check else task.num_nodes)
         for resource in task.resources:
-            namespace = (resource.cluster_config_overrides.get(
-                'kubernetes', {}).get('namespace') if namespace_bound else None)
+            namespace = resource.cluster_config_overrides.get(
+                'kubernetes', {}).get('namespace')
             if namespace is not None:
+                skypilot_config.get_effective_namespace(
+                    repr(resource.cloud).lower(),
+                    region=resource.region,
+                    override_configs=resource.cluster_config_overrides)
                 skypilot_config.get_effective_namespace(
                     repr(launched_resources.cloud).lower(),
                     region=launched_resources.region,

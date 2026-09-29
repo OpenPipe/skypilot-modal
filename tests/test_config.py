@@ -1842,7 +1842,7 @@ def test_task_namespace_respects_scoped_constraint(scope, requested,
 
 
 def test_task_kubernetes_namespace_rejects_ssh_pool():
-    with pytest.raises(ValueError, match='SSH node pools are unsupported'):
+    with pytest.raises(ValueError, match="placement, not 'ssh'.*k8s/<context>"):
         skypilot_config.get_effective_namespace(
             'ssh',
             'ssh-pool',
@@ -1874,6 +1874,7 @@ def test_get_effective_namespace_override_configs(monkeypatch,
     # Override replaces the global namespace when no per-context value exists.
     assert skypilot_config.get_effective_namespace(
         cloud='kubernetes',
+        region='contextB',
         workspace='default',
         override_configs=cloud_level_override) == 'override-namespace'
 
@@ -1896,6 +1897,7 @@ def test_get_effective_namespace_override_configs(monkeypatch,
     # Override applies for an unknown workspace (falls through to global).
     assert skypilot_config.get_effective_namespace(
         cloud='kubernetes',
+        region='contextB',
         workspace='nonexistent-ws',
         override_configs=cloud_level_override) == 'override-namespace'
 
