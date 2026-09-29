@@ -1129,8 +1129,9 @@ def write_cluster_config(
     volume_mount_vars = []
     ephemeral_volume_mount_vars = []
     conflict_checker = volume_utils.VolumeMountConflictChecker()
-    bound_namespace = to_provision.cluster_config_overrides.get(
+    bound_namespace = (to_provision.cluster_config_overrides.get(
         'kubernetes', {}).get('namespace')
+                       if repr(cloud).lower() == 'kubernetes' else None)
 
     if volume_mounts is not None:
         for vol in volume_mounts:

@@ -107,7 +107,8 @@ def inject_fixture(monkeypatch, tmp_path):
     def _inject(resolution,
                 volume_mounts=None,
                 volume_records=None,
-                namespace=None):
+                namespace=None,
+                cloud=None):
         monkeypatch.setattr(volume_utils, 'resolve_auto_mounts',
                             lambda region: resolution)
         looked_up = []
@@ -164,7 +165,7 @@ def inject_fixture(monkeypatch, tmp_path):
 
         backend_utils.write_cluster_config(
             to_provision=Resources(
-                cloud=clouds.Kubernetes(),
+                cloud=cloud or clouds.Kubernetes(),
                 _cluster_config_overrides=({} if namespace is None else {
                     'kubernetes': {
                         'namespace': namespace
@@ -202,11 +203,18 @@ def test_bound_namespace_matches_registered_volume(inject, source, namespace):
                       namespace=namespace).variables['volume_mounts']
 
 
-def test_bound_namespace_applies_to_new_ephemeral_volume(inject):
+@pytest.mark.parametrize(
+    'cloud', [clouds.Kubernetes(),
+              clouds.SSH(), clouds.AWS()])
+def test_bound_namespace_applies_to_new_ephemeral_volume(inject, cloud):
     mount = _task_volume('vol', is_ephemeral=True)
     mount.volume_config.config.pop('namespace')
-    inject(_NOTHING_AUTO_MOUNTED, volume_mounts=[mount], namespace='models')
-    assert mount.volume_config.config['namespace'] == 'models'
+    inject(_NOTHING_AUTO_MOUNTED,
+           volume_mounts=[mount],
+           namespace='models',
+           cloud=cloud)
+    assert mount.volume_config.config.get('namespace') == (
+        'models' if repr(cloud).lower() == 'kubernetes' else None)
 
 
 class TestAutoMountInjection:

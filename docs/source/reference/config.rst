@@ -1774,6 +1774,8 @@ config is authoritative, including an unchanged global namespace. A conflicting
 task namespace is rejected. A policy can allow task selection by returning no
 namespace constraint. Requests without a task namespace keep the existing
 workspace/context precedence.
+This admission check applies to cluster operations, managed jobs, and services
+before their task and returned config are passed to controllers.
 
 The launch flag ``--config kubernetes.namespace=my-namespace`` has the same
 effect. This changes the flag from an ambient default to a binding request.
