@@ -420,6 +420,8 @@ def test_stronger_singleton_survives_yaml_and_actual_sdk(
         'availableGpuCounts': [2, 4]
     }, {
         'availableGpuCounts': 1
+    }, {
+        'availableGpuCounts': [True]
     }
 ])
 def test_unavailable_stronger_host_is_not_feasible(monkeypatch, offline, bad):
@@ -515,20 +517,22 @@ def test_stronger_host_does_not_relax_exact_or_spot_requests(
     lookup.assert_not_called()
 
 
-def test_stronger_multi_gpu_preserves_total_minima(monkeypatch):
-    quote = {**_host_quote(), 'minVcpu': 64, 'minMemory': 1000}
-    lookup = mock.Mock(return_value=quote)
+def test_multi_gpu_keeps_static_contract_without_unproved_quote_units(
+        monkeypatch):
+    lookup = mock.Mock(side_effect=AssertionError('Unexpected live lookup'))
     monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
     resources = Resources(cloud=clouds.RunPod(),
                           accelerators='H200-SXM:4',
                           cpus='64+',
                           memory='800+')
-    chosen, = clouds.RunPod()._get_feasible_launchable_resources(
+    assert not clouds.RunPod()._get_feasible_launchable_resources(
         resources).resources_list
-    assert chosen.instance_type == '4x_H200-SXM_SECURE--64vcpu-859gb'
-    assert lookup.call_args.args[:5] == ('NVIDIA H200', 4, True, 64, 859)
+    chosen, = clouds.RunPod()._get_feasible_launchable_resources(
+        resources.copy(cpus='16+', memory='550+')).resources_list
+    assert chosen.instance_type == '4x_H200-SXM_SECURE'
     assert chosen.cloud.instance_type_to_hourly_cost(chosen.instance_type,
                                                      False) == 18.36
+    lookup.assert_not_called()
 
 
 @pytest.mark.parametrize('failure', ['http', 'graphql', 'null', 'malformed'])

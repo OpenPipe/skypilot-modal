@@ -44,7 +44,8 @@ def _quote_price(instance_type: str, cpus: int, memory_gb: int,
     if match is None:
         return math.inf
     count, gpu, cloud_type = match.groups()
-    if gpu not in runpod_utils.GPU_NAME_MAP:
+    # Multi-GPU lowestPrice units are unproved; retain their static contract.
+    if count != '1' or gpu not in runpod_utils.GPU_NAME_MAP:
         return math.inf
     gpu_count = int(count)
     quote = runpod.get_gpu_host_quote(runpod_utils.GPU_NAME_MAP[gpu], gpu_count,
@@ -64,9 +65,11 @@ def _quote_price(instance_type: str, cpus: int, memory_gb: int,
     if (actual_cpus < cpus or actual_memory < memory_gb or
             quote.get('stockStatus') not in ('Low', 'Medium', 'High') or
         (counts is not None and
-         (not isinstance(counts, list) or gpu_count not in counts))):
+         (not isinstance(counts, list) or
+          any(not isinstance(n, int) or isinstance(n, bool) or n <= 0
+              for n in counts) or gpu_count not in counts))):
         return math.inf
-    return float(price) * gpu_count
+    return float(price)
 
 
 def _provider_memory_gb(memory_gib: str) -> int:
@@ -101,7 +104,8 @@ def instance_type_exists(instance_type: str) -> bool:
         return False
     if cpus is None:
         return True
-    if not common.get_accelerators_from_instance_type_impl(_df, base):
+    accelerators = common.get_accelerators_from_instance_type_impl(_df, base)
+    if not accelerators or sum(accelerators.values()) != 1:
         return False
     base_cpus, base_memory = get_native_gpu_host_resources(base)
     return (base_cpus is not None and base_memory is not None and
@@ -186,7 +190,8 @@ def get_instance_type_for_accelerator(
     # The provider can enforce minima, not exact CPU/RAM or RAM:CPU ratios.
     # Preserve all existing static/spot matches and only query stronger hosts
     # when the catalog has the requested GPU count but its host floor misses.
-    if (result[0] or result[0] is None or use_spot or zone is not None or
+    if (result[0] or result[0] is None or acc_count != 1 or use_spot or
+            zone is not None or
             any(v is not None and not v.endswith('+') for v in (cpus, memory))):
         return result
     bases, _ = common.get_instance_type_for_accelerator_impl(_memory_in_gib(),
