@@ -6731,6 +6731,18 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         # later during the retry.
         common_utils.check_cluster_name_is_valid(cluster_name)
 
+        if (to_provision is not None and
+                isinstance(handle_before_refresh, CloudVmRayResourceHandle) and
+                handle_before_refresh.launched_resources is not None and
+                isinstance(handle_before_refresh.launched_resources.cloud,
+                           clouds.Modal)):
+            matched_resource = self.check_resources_fit_cluster(
+                handle_before_refresh, task)
+            modal_config = matched_resource.cluster_config_overrides.get(
+                'modal')
+            if modal_config:
+                to_provision = to_provision.copy(
+                    _cluster_config_overrides={'modal': modal_config})
         if to_provision is None:
             # Recently terminated after refresh. OPTIMIZE usually ran outside
             # the lock, so that decision may be stale by now. Under the lock,

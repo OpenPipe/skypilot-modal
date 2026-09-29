@@ -76,8 +76,9 @@ def test_expired_modal_retry_finishes_before_provisioning(
     (2000000000.75, 1999999999.75),
 ])
 @pytest.mark.parametrize('terminated', [False, True])
+@pytest.mark.parametrize('planned', [False, True])
 def test_modal_reuse_preserves_rendered_deadline(requested, actual, terminated,
-                                                 monkeypatch):
+                                                 planned, monkeypatch):
     # Original deadline came from global config, so it is absent from Resources.
     original = sky.Resources(infra='modal/auto', instance_type='4CPU--16GB')
     handle = mock.Mock(spec=CloudVmRayResourceHandle,
@@ -113,9 +114,12 @@ def test_modal_reuse_preserves_rendered_deadline(requested, actual, terminated,
         if requested is not None and requested != actual:
             with pytest.raises(exceptions.ResourcesMismatchError,
                                match='Existing Modal deadline'):
-                backend._check_existing_cluster(task, None, 'existing')
+                backend._check_existing_cluster(task,
+                                                original if planned else None,
+                                                'existing')
         else:
-            result = backend._check_existing_cluster(task, None, 'existing')
+            result = backend._check_existing_cluster(
+                task, original if planned else None, 'existing')
             assert result.prev_handle is (None if terminated else handle)
             assert result.resources.cluster_config_overrides.get(
                 'modal', {}).get('deadline') == actual
