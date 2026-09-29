@@ -1403,7 +1403,8 @@ def get_effective_namespace(
         override_configs: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Returns the effective Kubernetes namespace from config.
 
-    Resolution precedence, most specific first:
+    An explicit task-level ``kubernetes.namespace`` binds the destination,
+    overriding workspace/context defaults. Without it, resolution precedence:
 
     1. ``workspaces.<workspace>.<cloud>.context_configs.<region>.namespace``
     2. ``workspaces.<workspace>.<cloud>.namespace``
@@ -1411,6 +1412,11 @@ def get_effective_namespace(
     4. ``<cloud>.namespace``
     5. ``None`` — caller is responsible for the kubeconfig-default fallback.
     """
+    if cloud == 'kubernetes' and override_configs is not None:
+        namespace = config_utils.Config(override_configs).get_nested(
+            ('kubernetes', 'namespace'), None)
+        if namespace is not None:
+            return namespace
     return _get_effective_scoped_config_value(cloud=cloud,
                                               property_keys=_NAMESPACE_KEYS,
                                               region=region,

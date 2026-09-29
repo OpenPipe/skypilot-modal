@@ -1820,10 +1820,7 @@ def test_get_effective_namespace_no_config(monkeypatch, tmp_path) -> None:
 
 def test_get_effective_namespace_override_configs(monkeypatch,
                                                   tmp_path) -> None:
-    """Cloud-level `override_configs` apply inside workspace scope.
-
-    Regression mirror of `test_get_effective_queue_name_workspace_override`.
-    """
+    """An explicit task namespace overrides workspace/context defaults."""
     with open(tmp_path / 'override.yaml', 'w', encoding='utf-8') as f:
         f.write("""\
         kubernetes:
@@ -1847,13 +1844,12 @@ def test_get_effective_namespace_override_configs(monkeypatch,
         workspace='default',
         override_configs=cloud_level_override) == 'override-namespace'
 
-    # Per-context value wins over a cloud-level override (more specific).
+    # Task namespace binds the destination even with a workspace context.
     assert skypilot_config.get_effective_namespace(
         cloud='kubernetes',
         region='contextA',
         workspace='workspaceA',
-        override_configs=cloud_level_override
-    ) == 'workspaceA-contextA-namespace'
+        override_configs=cloud_level_override) == 'override-namespace'
 
     # Override applies for an unknown workspace (falls through to global).
     assert skypilot_config.get_effective_namespace(

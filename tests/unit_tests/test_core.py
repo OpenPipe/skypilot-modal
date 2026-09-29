@@ -1,7 +1,9 @@
+import inspect
 from unittest import mock
 
 import pytest
 
+import sky
 from sky import admin_policy as sky_admin_policy
 from sky import clouds
 from sky import core
@@ -10,11 +12,59 @@ from sky import global_user_state
 from sky import models
 from sky.backends.cloud_vm_ray_backend import CloudVmRayBackend
 from sky.backends.cloud_vm_ray_backend import CloudVmRayResourceHandle
+from sky.client import sdk
+from sky.server import constants as server_constants
 from sky.skylet import job_lib
 from sky.utils import common
 from sky.utils import common_utils
+from sky.utils import dag_utils
 from sky.utils import status_lib
 from sky.workspaces import constants as workspace_constants
+
+
+@pytest.mark.parametrize('api_version', [None, 24, 64])
+@pytest.mark.parametrize('operation', ['validate', 'optimize'])
+def test_task_namespace_rejected_before_old_server_request(
+        api_version, operation, monkeypatch):
+    task = sky.Task.from_yaml_config({
+        'config': {
+            'kubernetes': {
+                'namespace': 'models'
+            }
+        },
+    })
+    dag = dag_utils.convert_entrypoint_to_dag(task)
+    monkeypatch.setattr(sdk.versions, 'get_remote_api_version',
+                        lambda: api_version)
+    request = mock.Mock(side_effect=AssertionError('unexpected request'))
+    monkeypatch.setattr(sdk.server_common, 'make_authenticated_request',
+                        request)
+    # Exercise the function body without the health/start/usage decorators.
+    with pytest.raises(exceptions.APINotSupportedError,
+                       match='Task kubernetes.namespace.*API_VERSION >= 65'):
+        inspect.unwrap(getattr(sdk, operation))(dag)
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize('namespace', [None, 'models'])
+def test_task_namespace_supported_server_and_absent_override(
+        namespace, monkeypatch):
+    config = {} if namespace is None else {
+        'kubernetes': {
+            'namespace': namespace
+        }
+    }
+    dag = dag_utils.convert_entrypoint_to_dag(
+        sky.Task.from_yaml_config({'config': config}))
+    monkeypatch.setattr(
+        sdk.versions, 'get_remote_api_version', lambda: None if namespace is
+        None else server_constants.MIN_TASK_KUBERNETES_NAMESPACE_API_VERSION)
+    request = mock.Mock(side_effect=RuntimeError('server request'))
+    monkeypatch.setattr(sdk.server_common, 'make_authenticated_request',
+                        request)
+    with pytest.raises(RuntimeError, match='server request'):
+        inspect.unwrap(sdk.validate)(dag)
+    request.assert_called_once()
 
 
 @mock.patch('sky.backends.backend_utils.check_cluster_available')

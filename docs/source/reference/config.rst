@@ -1759,6 +1759,24 @@ For per-workspace overrides — e.g. sharing a single cluster context across
 teams, with each team scoped to its own namespace — see
 :ref:`Workspaces <workspaces>`.
 
+With API server version 65 or newer, an explicit task namespace binds that
+task's Kubernetes destination, overriding global, workspace and per-context
+namespace defaults:
+
+.. code-block:: yaml
+
+  config:
+    kubernetes:
+      namespace: my-namespace
+
+The launch flag ``--config kubernetes.namespace=my-namespace`` has the same
+effect. New clients reject these task overrides on older servers; upgrade
+both client and server to use the binding. Global config alone retains its
+workspace/context precedence when there is no explicit task override.
+``pod_config.metadata.namespace`` does not bind placement: pod creation uses
+the resolved provider namespace. Namespace binding does not move an existing
+cluster into a different namespace.
+
 .. _config-yaml-kubernetes-allowed-nodes:
 
 ``kubernetes.allowed_nodes``
