@@ -25,7 +25,15 @@ _TIMEOUT = 10
 def get_gpu_host_quote(gpu_id: str, gpu_count: int, secure: bool, cpus: int,
                        memory_gb: int,
                        region: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Read a bounded host quote without reserving capacity."""
+    """Cache a bounded host quote for resource selection."""
+    return _get_gpu_host_quote(gpu_id, gpu_count, secure, cpus, memory_gb,
+                               region)
+
+
+def _get_gpu_host_quote(gpu_id: str, gpu_count: int, secure: bool, cpus: int,
+                        memory_gb: int,
+                        region: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Read a fresh host quote without reserving capacity."""
     fields = [
         f'gpuCount: {gpu_count}', f'secureCloud: {str(secure).lower()}',
         f'minVcpuCount: {cpus}', f'minMemoryInGb: {memory_gb}'

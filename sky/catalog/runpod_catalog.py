@@ -26,6 +26,7 @@ _df = common.read_catalog('runpod/vms.csv',
                           pull_frequency_hours=_PULL_FREQUENCY_HOURS)
 
 # Sized variants retain guaranteed minima and the selected hourly estimate.
+# This serialized estimate is editable, not authoritative billing or admission.
 # Accounting must survive round trips without consulting current availability.
 _SIZED = re.compile(r'(.+)--([1-9][0-9]*)vcpu-([1-9][0-9]*)gb-'
                     r'([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)usd$')
@@ -60,9 +61,9 @@ def _quote_price(instance_type: str,
     gpu_count = int(count)
     # Admission bypasses the existing selection cache; availability and price
     # may have changed even within its 60-second lifetime.
-    lookup = runpod.get_gpu_host_quote
-    if fresh:
-        lookup = getattr(lookup, '__wrapped__', lookup)
+    # pylint: disable-next=protected-access
+    lookup = (runpod._get_gpu_host_quote
+              if fresh else runpod.get_gpu_host_quote)
     quote = lookup(runpod_utils.GPU_NAME_MAP[gpu], gpu_count,
                    cloud_type == 'SECURE', cpus, memory_gb, region)
     if not isinstance(quote, dict):
