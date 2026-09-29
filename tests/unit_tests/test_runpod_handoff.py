@@ -2,6 +2,7 @@
 # The test exercises the provider's internal selection entry point.
 # pylint: disable=protected-access
 import importlib
+import math
 from unittest import mock
 
 import jsonschema
@@ -57,7 +58,8 @@ def _render(tmp_path,
             memory='550+',
             cuda=('13.0',),
             spot=False,
-            cpu_only=False):
+            cpu_only=False,
+            accelerators='H200-SXM:4'):
     overrides = {} if cuda is None else {
         'runpod': {
             'allowed_cuda_versions': list(cuda)
@@ -66,7 +68,7 @@ def _render(tmp_path,
     resources = Resources(cloud=clouds.RunPod(),
                           cpus=cpus,
                           memory=memory,
-                          accelerators='H200-SXM:4',
+                          accelerators=accelerators,
                           use_spot=spot,
                           image_id='docker:example/pinned:cuda13')
     resources = resources.copy(_cluster_config_overrides=overrides)
@@ -339,3 +341,240 @@ def test_normalized_view_keeps_native_shape_and_cpu_rows(offline, monkeypatch):
         assert catalog.get_default_instance_type(cpus='2',
                                                  memory='4') == ('cpu3c-2-4')
     pd.testing.assert_frame_equal(frame, before)
+
+
+def _singleton(frame):
+    frame['InstanceType'] = '1x_H200-SXM_SECURE'
+    frame['AcceleratorCount'] = 1
+    frame['vCPUs'] = 12
+    frame['MemoryGiB'] = 188
+    frame['Price'] = 4.59
+
+
+def _host_quote(**overrides):
+    # Retained constrained provider response: gpuCount=1, CPU>=16, GB>=207.
+    return dict(uninterruptablePrice=4.59,
+                minVcpu=20,
+                minMemory=251,
+                stockStatus='Low',
+                availableGpuCounts=None,
+                **overrides)
+
+
+@pytest.mark.parametrize('offer_cpu,offer_gb', [(20, 251), (24, 377)])
+def test_stronger_singleton_survives_yaml_and_actual_sdk(
+        tmp_path, monkeypatch, offline, offer_cpu, offer_gb):
+    sdk = pytest.importorskip('runpod')
+    ctl = importlib.import_module('runpod.api.ctl_commands')
+    catalog = importlib.import_module('sky.catalog.runpod_catalog')
+    _singleton(offline)
+    before = offline.copy(deep=True)
+    quote = _host_quote()
+    quote.update(minVcpu=offer_cpu, minMemory=offer_gb)
+    lookup = mock.Mock(return_value=quote)
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    calls = []
+    monkeypatch.setattr(adaptor, 'runpod', sdk)
+    monkeypatch.setattr(ctl, 'get_gpu', lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        ctl, 'run_graphql_query', lambda body: (calls.append(body) or {
+            'data': {
+                'podFindAndDeployOnDemand': {
+                    'id': 'pod-test'
+                }
+            }
+        }))
+    config = _render(tmp_path, memory='192+', accelerators='H200-SXM:1')
+    assert config.node_config['InstanceType'] == '1x_H200-SXM_SECURE'
+    assert config.node_config['MinVCPUCount'] == 16
+    assert config.node_config['MinMemoryInGB'] == 207
+    _run(config, monkeypatch)
+    assert len(calls) == 1
+    assert 'gpuCount: 1' in calls[0]
+    assert 'minVcpuCount: 16' in calls[0]
+    assert 'minMemoryInGb: 207' in calls[0]
+    assert lookup.call_args.args[:5] == ('NVIDIA H200', 1, True, 16, 207)
+    pd.testing.assert_frame_equal(offline, before)
+    assert catalog.get_native_gpu_host_resources('1x_H200-SXM_SECURE') == (12,
+                                                                           188)
+
+
+@pytest.mark.parametrize('bad', [
+    None, {}, {
+        'minVcpu': 15
+    }, {
+        'minMemory': 206
+    }, {
+        'stockStatus': None
+    }, {
+        'stockStatus': 'None'
+    }, {
+        'uninterruptablePrice': None
+    }, {
+        'uninterruptablePrice': math.nan
+    }, {
+        'minVcpu': True
+    }, {
+        'availableGpuCounts': []
+    }, {
+        'availableGpuCounts': [2, 4]
+    }, {
+        'availableGpuCounts': 1
+    }
+])
+def test_unavailable_stronger_host_is_not_feasible(monkeypatch, offline, bad):
+    _singleton(offline)
+    quote = None if bad is None else {**_host_quote(), **bad}
+    if bad == {}:
+        quote = {}
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lambda *args: quote)
+    resources = Resources(cloud=clouds.RunPod(),
+                          accelerators='H200-SXM:1',
+                          cpus='16+',
+                          memory='192+')
+    assert not clouds.RunPod()._get_feasible_launchable_resources(
+        resources).resources_list
+
+
+@pytest.mark.parametrize('gib,gb', [
+    ('192', 207),
+    ('550', 591),
+    ('0.931322574615478515625', 1),
+    ('0.931322574615478515624', 1),
+    ('0.931322574615478515626', 2),
+])
+def test_requested_gib_rounds_up_once(gib, gb):
+    catalog = importlib.import_module('sky.catalog.runpod_catalog')
+    assert catalog._provider_memory_gb(gib) == gb
+
+
+def test_sized_resources_round_trip_and_price_bound(monkeypatch, offline):
+    _singleton(offline)
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote',
+                        lambda *args: _host_quote())
+    resources = Resources(cloud=clouds.RunPod(),
+                          accelerators='H200-SXM:1',
+                          cpus='16+',
+                          memory='192+',
+                          region='US')
+    chosen, = clouds.RunPod()._get_feasible_launchable_resources(
+        resources).resources_list
+    restored, = Resources.from_yaml_config(chosen.to_yaml_config())
+    restored.validate()
+    assert restored.instance_type == '1x_H200-SXM_SECURE--16vcpu-207gb'
+    assert restored.accelerators == {'H200-SXM': 1}
+    assert restored.cpus == '16'
+    assert restored.memory == '192+'
+    assert restored.cloud.instance_type_to_hourly_cost(restored.instance_type,
+                                                       False,
+                                                       region='US') == 4.59
+    assert not clouds.RunPod()._get_feasible_launchable_resources(
+        resources.copy(max_hourly_cost=4.58)).resources_list
+    assert len(clouds.RunPod()._get_feasible_launchable_resources(
+        resources.copy(max_hourly_cost=4.59)).resources_list) == 1
+
+
+def test_quote_loss_before_render_never_creates_pod(tmp_path, monkeypatch,
+                                                    offline):
+    _singleton(offline)
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote',
+                        mock.Mock(side_effect=[_host_quote(), None]))
+    with pytest.raises(ValueError, match='No current RunPod host quote'):
+        _render(tmp_path, memory='192+', accelerators='H200-SXM:1')
+
+
+@pytest.mark.parametrize('kwargs', [
+    dict(cpus='16'),
+    dict(memory='192'),
+    dict(memory='12x'),
+    dict(use_spot=True)
+])
+def test_stronger_host_does_not_relax_exact_or_spot_requests(
+        monkeypatch, offline, kwargs):
+    _singleton(offline)
+    lookup = mock.Mock(side_effect=AssertionError('Unexpected live lookup'))
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    resources = Resources(cloud=clouds.RunPod(),
+                          accelerators='H200-SXM:1',
+                          **{
+                              'cpus': '16+',
+                              'memory': '192+',
+                              **kwargs
+                          })
+    assert not clouds.RunPod()._get_feasible_launchable_resources(
+        resources).resources_list
+    lookup.assert_not_called()
+
+
+def test_stronger_multi_gpu_preserves_total_minima(monkeypatch):
+    quote = {**_host_quote(), 'minVcpu': 64, 'minMemory': 1000}
+    lookup = mock.Mock(return_value=quote)
+    monkeypatch.setattr(adaptor, 'get_gpu_host_quote', lookup)
+    resources = Resources(cloud=clouds.RunPod(),
+                          accelerators='H200-SXM:4',
+                          cpus='64+',
+                          memory='800+')
+    chosen, = clouds.RunPod()._get_feasible_launchable_resources(
+        resources).resources_list
+    assert chosen.instance_type == '4x_H200-SXM_SECURE--64vcpu-859gb'
+    assert lookup.call_args.args[:5] == ('NVIDIA H200', 4, True, 64, 859)
+    assert chosen.cloud.instance_type_to_hourly_cost(chosen.instance_type,
+                                                     False) == 18.36
+
+
+@pytest.mark.parametrize('failure', ['http', 'graphql', 'null', 'malformed'])
+def test_constrained_quote_failure_is_not_an_offer(monkeypatch, failure):
+    adaptor.get_gpu_host_quote.cache_clear()
+    monkeypatch.setattr(adaptor, '_get_api_key', lambda: 'test-key')
+    response = mock.Mock()
+    response.json.return_value = {
+        'data': {
+            'gpuTypes': [{
+                'lowestPrice': _host_quote()
+            }]
+        }
+    }
+    if failure == 'http':
+        response.raise_for_status.side_effect = requests.HTTPError('private')
+    elif failure == 'graphql':
+        response.json.return_value = {'errors': [{'message': 'private'}]}
+    elif failure == 'null':
+        response.json.return_value = {
+            'data': {
+                'gpuTypes': [{
+                    'lowestPrice': None
+                }]
+            }
+        }
+    else:
+        response.json.return_value = {'data': None}
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: response)
+    assert adaptor.get_gpu_host_quote('NVIDIA H200', 1, True, 16, 207,
+                                      'US') is None
+    adaptor.get_gpu_host_quote.cache_clear()
+
+
+def test_constrained_quote_request_is_read_only_and_bounded(monkeypatch):
+    adaptor.get_gpu_host_quote.cache_clear()
+    monkeypatch.setattr(adaptor, '_get_api_key', lambda: 'test-key')
+    response = mock.Mock()
+    response.json.return_value = {
+        'data': {
+            'gpuTypes': [{
+                'lowestPrice': _host_quote()
+            }]
+        }
+    }
+    post = mock.Mock(return_value=response)
+    monkeypatch.setattr(requests, 'post', post)
+    assert adaptor.get_gpu_host_quote('NVIDIA H200', 1, True, 16, 207,
+                                      'US') == _host_quote()
+    body = post.call_args.kwargs['json']['query']
+    assert body.startswith('query ')
+    for field in ('gpuCount: 1', 'secureCloud: true', 'minVcpuCount: 16',
+                  'minMemoryInGb: 207', 'countryCode: "US"'):
+        assert field in body
+    assert post.call_args.kwargs['timeout'] == 10
+    adaptor.get_gpu_host_quote('NVIDIA H200', 1, True, 16, 207, 'US')
+    assert post.call_count == 1
+    adaptor.get_gpu_host_quote.cache_clear()
