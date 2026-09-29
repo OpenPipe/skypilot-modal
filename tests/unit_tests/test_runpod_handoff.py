@@ -63,6 +63,8 @@ def offline_catalog(monkeypatch):
                         lambda *args, **kwargs: frame)
     catalog = importlib.import_module('sky.catalog.runpod_catalog')
     monkeypatch.setattr(catalog, '_df', frame)
+    monkeypatch.setattr(accelerator_registry, '_accelerator_df',
+                        frame.assign(Clouds='RunPod'))
     selection_cache = adaptor.get_gpu_host_quote
     selection_cache.cache_clear()
     with skypilot_config.replace_skypilot_config_in_process(
