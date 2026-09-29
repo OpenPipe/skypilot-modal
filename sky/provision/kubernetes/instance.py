@@ -1988,7 +1988,7 @@ def pre_init(namespace: str, context: Optional[str], new_nodes: List) -> None:
         '"s@session\\s*required\\s*pam_loginuid.so@session optional '
         'pam_loginuid.so@g" -i /etc/pam.d/sshd; '
         'cd /etc/ssh/ && $(prefix_cmd) ssh-keygen -A; '
-        # Match the template: authenticate in passwd home, preserving image HOME.
+        # Match the template: use passwd home without changing image HOME.
         'skypilot_ssh_home=$(unset HOME && builtin printf \'%s\\n\' ~); '
         'case "$skypilot_ssh_home" in '
         '/*) ;; '
