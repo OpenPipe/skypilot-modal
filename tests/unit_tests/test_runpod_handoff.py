@@ -27,6 +27,7 @@ from sky.utils import common_utils
 from sky.utils import config_utils
 from sky.utils import resources_utils
 from sky.utils import schemas
+from sky.utils import status_lib
 
 
 @pytest.fixture(autouse=True, name='offline')
@@ -491,8 +492,12 @@ def test_quote_loss_before_render_never_creates_pod(tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize('quote', [None, {'uninterruptablePrice': 5.0}])
+@pytest.mark.parametrize('previous_status', [
+    None, status_lib.ClusterStatus.INIT, status_lib.ClusterStatus.UP,
+    status_lib.ClusterStatus.STOPPED
+])
 def test_render_quote_rejection_uses_actual_capacity_fallback(
-        tmp_path, monkeypatch, offline, quote):
+        tmp_path, monkeypatch, offline, quote, previous_status):
     _singleton(offline)
     rejected = None if quote is None else _host_quote() | quote
     lookup = mock.Mock(side_effect=[_host_quote(), rejected])
@@ -506,6 +511,8 @@ def test_render_quote_rejection_uses_actual_capacity_fallback(
                         image_id='docker:example/pinned:cuda13')
     selected, = request.cloud._get_feasible_launchable_resources(
         request).resources_list
+    if previous_status is not None:
+        selected = selected.copy(zone='US-TEST-1')
     provisioner = cloud_vm_ray_backend.RetryingVmProvisioner(
         str(tmp_path),
         None,
@@ -522,21 +529,25 @@ def test_render_quote_rejection_uses_actual_capacity_fallback(
     task = task_lib.Task().set_resources(request)
     # Real Resources -> write_cluster_config -> RunPod renderer, caught by the
     # real zone loop. No cloud call or state publication should be reached.
+    expected = ('Failed to acquire resources'
+                if previous_status is None else None)
     with pytest.raises(exceptions.ResourcesUnavailableError,
-                       match='Failed to acquire resources') as caught:
+                       match=expected) as caught:
         provisioner._retry_zones(selected,
                                  1, {request},
                                  dryrun=True,
                                  stream_logs=False,
                                  cluster_name='offline-quote-rejection',
                                  cloud_user_identity=None,
-                                 prev_cluster_status=None,
+                                 prev_cluster_status=previous_status,
                                  prev_handle=None,
-                                 prev_cluster_ever_up=False,
+                                 prev_cluster_ever_up=previous_status
+                                 in (status_lib.ClusterStatus.UP,
+                                     status_lib.ClusterStatus.STOPPED),
                                  skip_if_config_hash_matches=None,
                                  volume_mounts=None,
                                  task=task)
-    assert not caught.value.no_failover
+    assert caught.value.no_failover is (previous_status is not None)
     assert lookup.call_count == 2
     created.assert_not_called()
     assert not list(tmp_path.iterdir())

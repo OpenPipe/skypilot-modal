@@ -1164,6 +1164,11 @@ class RetryingVmProvisioner(object):
                         extra_template_variables=extra_vars,
                     )
                 except exceptions.ResourcesUnavailableError as e:
+                    if cluster_exists:
+                        # No provisioning or teardown occurred; an INIT
+                        # cluster may still have live resources to preserve.
+                        raise exceptions.ResourcesUnavailableError(
+                            str(e), no_failover=True) from e
                     # Failed due to catalog issue, e.g. image not found, or
                     # GPUs are requested in a Kubernetes cluster but the cluster
                     # does not have nodes labeled with GPU types.
