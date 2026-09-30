@@ -185,30 +185,78 @@ def test_delayed_entrypoint_does_not_start_ssh_or_setup(tmp_path):
 @pytest.mark.parametrize('cancel', [False, True])
 def test_entrypoint_expiry_and_cancel_end_child_group(tmp_path, cancel):
     marker = tmp_path / 'started'
+    ready = tmp_path / 'ready'
     script = (f'echo $$ > {shlex.quote(str(marker))}; sleep 30 & '
               f'echo $! >> {shlex.quote(str(marker))}; wait')
+    # Gate the second wall-clock sample inside the supervisor's try/finally.
+    # Keep real wait/killpg behavior without spending its budget on startup.
+    # Expiry still waits 0.7s; cancellation gets 30s to avoid racing expiry.
+    clock = f"""\
+import pathlib, subprocess, time
+samples = iter((False, True))
+def wall_time():
+    if not next(samples):
+        return 0.0
+    marker = pathlib.Path({str(marker)!r})
+    until = time.monotonic() + 2
+    while time.monotonic() < until:
+        if marker.exists() and len(marker.read_text().splitlines()) == 2:
+            pathlib.Path({str(ready)!r}).touch()
+            return {0.0 if cancel else 29.3}
+        time.sleep(0.01)
+    raise TimeoutError('child group did not become ready')
+time.time = wall_time
+"""
+    command = deadline.command(script, 30)
+    command[2] = clock + command[2]
     start = time.monotonic()
-    process = subprocess.Popen(deadline.command(script, time.time() + 0.7))
+    process = subprocess.Popen(command,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE,
+                               text=True)
+    group_ready = False
     try:
         while time.monotonic() - start < 2:
-            if marker.exists() and len(marker.read_text().splitlines()) == 2:
+            if ready.exists() or process.poll() is not None:
                 break
             time.sleep(0.01)
-        children = [int(pid) for pid in marker.read_text().splitlines()]
-        assert len(children) == 2
-        if cancel:
-            process.send_signal(signal.SIGTERM)
-        assert process.wait(timeout=3) == (143 if cancel else 124)
-        assert time.monotonic() - start < 3
-        for pid in children:
+        group_ready = ready.exists()
+        if group_ready:
+            start = time.monotonic()
+            children = [int(pid) for pid in marker.read_text().splitlines()]
+            assert len(children) == 2
+            if cancel:
+                process.send_signal(signal.SIGTERM)
+            assert process.wait(timeout=3) == (143 if cancel else 124)
+            assert time.monotonic() - start < 3
+            for pid in children:
+                try:
+                    assert psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+                except psutil.NoSuchProcess:
+                    pass
+    finally:
+        # Retain owned descendants before a forced supervisor shutdown.
+        owned = []
+        if process.poll() is None:
             try:
-                assert psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+                owned = psutil.Process(process.pid).children(recursive=True)
             except psutil.NoSuchProcess:
                 pass
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=3)
+            process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=3)
+        finally:
+            for child in owned:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)
+    assert group_ready, (f'child group not ready: rc={process.returncode}, '
+                         f'stdout={stdout[-2000:]!r}, '
+                         f'stderr={stderr[-2000:]!r}')
 
 
 def test_entrypoint_preserves_early_exit():
