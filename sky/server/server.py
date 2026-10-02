@@ -2288,6 +2288,10 @@ def _extract_members(zipf, members: List[zipfile.ZipInfo],
 
         # Handle directories
         if member.filename.endswith('/'):
+            # Legacy uploads may leave a mount root pointing at another path.
+            # Replace the link itself, never write into its previous target.
+            if new_path.is_symlink():
+                new_path.unlink()
             new_path.mkdir(parents=True, exist_ok=True)
             continue
 

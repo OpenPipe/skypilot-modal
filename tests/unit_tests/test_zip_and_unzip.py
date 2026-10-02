@@ -17,8 +17,8 @@ from sky.skylet import constants
 
 @pytest.mark.parametrize('absolute_target', [False, True])
 @pytest.mark.parametrize('relative_to_items', [False, True])
-def test_directory_symlink_mount_is_self_contained(tmp_path, absolute_target,
-                                                   relative_to_items):
+def test_directory_symlink_mount_is_materialized(tmp_path, absolute_target,
+                                                 relative_to_items):
     donor = tmp_path / 'donor'
     donor.mkdir()
     (donor / 'payload').write_text('mounted contents')
@@ -48,7 +48,9 @@ def test_directory_symlink_mount_is_self_contained(tmp_path, absolute_target,
 
 
 @pytest.mark.parametrize('parent_first', [False, True])
-def test_explicit_symlink_mount_overlapping_parent(tmp_path, parent_first):
+@pytest.mark.parametrize('double_slash', [False, True])
+def test_explicit_symlink_mount_overlapping_parent(tmp_path, parent_first,
+                                                   double_slash):
     donor = tmp_path / 'donor'
     donor.mkdir()
     (donor / 'payload').write_text('mounted contents')
@@ -56,7 +58,7 @@ def test_explicit_symlink_mount_overlapping_parent(tmp_path, parent_first):
     parent.mkdir()
     mount = parent / 'mount'
     mount.symlink_to(donor, target_is_directory=True)
-    items = [str(parent), str(mount)]
+    items = [str(parent), ('/' if double_slash else '') + str(mount)]
     if not parent_first:
         items.reverse()
     archive = tmp_path / 'mount.zip'
@@ -68,6 +70,32 @@ def test_explicit_symlink_mount_overlapping_parent(tmp_path, parent_first):
     mounted = destination / str(mount).lstrip('/')
     assert mounted.is_dir() and not mounted.is_symlink()
     assert (mounted / 'payload').read_text() == 'mounted contents'
+
+
+@pytest.mark.parametrize('dangling', [False, True])
+def test_directory_upload_replaces_legacy_root_symlink(tmp_path, dangling):
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'payload').write_text('new contents')
+    archive = tmp_path / 'upload.zip'
+    storage_utils.zip_files_and_folders([str(source)], archive)
+    destination = tmp_path / 'received'
+    mounted = destination / str(source).lstrip('/')
+    mounted.parent.mkdir(parents=True)
+    old_target = destination / 'old-target'
+    if not dangling:
+        old_target.mkdir()
+        (old_target / 'payload').write_text('old contents')
+    mounted.symlink_to(old_target, target_is_directory=True)
+
+    asyncio.run(server.unzip_file(archive, destination))
+
+    assert not mounted.is_symlink()
+    assert (mounted / 'payload').read_text() == 'new contents'
+    if dangling:
+        assert not old_target.exists()
+    else:
+        assert (old_target / 'payload').read_text() == 'old contents'
 
 
 @pytest.mark.parametrize('mode', [0o700, 0o755, 0o640, 0o7755])
