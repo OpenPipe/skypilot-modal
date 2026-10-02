@@ -15,6 +15,61 @@ from sky.server import server
 from sky.skylet import constants
 
 
+@pytest.mark.parametrize('absolute_target', [False, True])
+@pytest.mark.parametrize('relative_to_items', [False, True])
+def test_directory_symlink_mount_is_self_contained(tmp_path, absolute_target,
+                                                   relative_to_items):
+    donor = tmp_path / 'donor'
+    donor.mkdir()
+    (donor / 'payload').write_text('mounted contents')
+    (donor / 'empty').mkdir()
+    (donor / 'file-link').symlink_to('payload')
+    (donor / 'directory-link').symlink_to('empty', target_is_directory=True)
+    mount = tmp_path / 'mount'
+    mount.symlink_to(donor if absolute_target else 'donor',
+                     target_is_directory=True)
+    archive = tmp_path / 'mount.zip'
+    storage_utils.zip_files_and_folders([str(mount)],
+                                        archive,
+                                        relative_to_items=relative_to_items)
+
+    destination = tmp_path / 'extracted'
+    asyncio.run(server.unzip_file(archive, destination))
+    mounted = destination / (mount.name
+                             if relative_to_items else str(mount).lstrip('/'))
+    assert mounted.is_dir() and not mounted.is_symlink()
+    assert (mounted / 'payload').read_text() == 'mounted contents'
+    assert (mounted / 'empty').is_dir()
+    assert (mounted / 'file-link').is_symlink()
+    assert (mounted / 'file-link').read_text() == 'mounted contents'
+    assert (mounted / 'directory-link').is_symlink()
+    assert (mounted / 'directory-link').is_dir()
+    assert mount.is_symlink()  # Packaging never rewrites the source.
+
+
+@pytest.mark.parametrize('parent_first', [False, True])
+def test_explicit_symlink_mount_overlapping_parent(tmp_path, parent_first):
+    donor = tmp_path / 'donor'
+    donor.mkdir()
+    (donor / 'payload').write_text('mounted contents')
+    parent = tmp_path / 'parent'
+    parent.mkdir()
+    mount = parent / 'mount'
+    mount.symlink_to(donor, target_is_directory=True)
+    items = [str(parent), str(mount)]
+    if not parent_first:
+        items.reverse()
+    archive = tmp_path / 'mount.zip'
+    storage_utils.zip_files_and_folders(items, archive)
+    destination = tmp_path / 'extracted'
+
+    asyncio.run(server.unzip_file(archive, destination))
+
+    mounted = destination / str(mount).lstrip('/')
+    assert mounted.is_dir() and not mounted.is_symlink()
+    assert (mounted / 'payload').read_text() == 'mounted contents'
+
+
 @pytest.mark.parametrize('mode', [0o700, 0o755, 0o640, 0o7755])
 def test_uploaded_regular_file_permissions(tmp_path, mode):
     source = tmp_path / 'executable'
