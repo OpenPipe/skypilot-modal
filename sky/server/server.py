@@ -2257,7 +2257,7 @@ def _extract_members(zipf, members: List[zipfile.ZipInfo],
     for member in members:
         # Determine the new path
         original_path = os.path.normpath(member.filename)
-        new_path = client_file_mounts_dir / original_path.lstrip('/')
+        new_path = resolved_client_file_mounts_dir / original_path.lstrip('/')
 
         # Security check: ensure extracted path stays within target
         # directory to prevent Zip Slip attacks (path traversal via

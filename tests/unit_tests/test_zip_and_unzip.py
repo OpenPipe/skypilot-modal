@@ -203,9 +203,12 @@ def test_upload_without_unix_permissions_keeps_default_mode(
         control.stat().st_mode)
 
 
-def test_unzip_file_with_symlinked_destination(tmp_path):
+@pytest.mark.parametrize('root_entry', [False, True])
+def test_unzip_file_with_symlinked_destination(tmp_path, root_entry):
     archive = tmp_path / 'upload.zip'
     with zipfile.ZipFile(archive, 'w') as bundle:
+        if root_entry:
+            bundle.writestr('./', b'')
         bundle.writestr('data', b'payload')
     destination = tmp_path / 'received'
     destination.mkdir()
@@ -214,6 +217,7 @@ def test_unzip_file_with_symlinked_destination(tmp_path):
 
     asyncio.run(server.unzip_file(archive, destination_alias))
 
+    assert destination_alias.is_symlink()
     assert (destination / 'data').read_bytes() == b'payload'
 
 
