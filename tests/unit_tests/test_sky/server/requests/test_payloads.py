@@ -5,6 +5,24 @@ from sky.skylet import constants
 from sky.usage import usage_lib
 
 
+def test_request_body_supplied_env_vars_are_not_recomputed(monkeypatch):
+    def fail():
+        raise AssertionError('supplied env vars must not read local defaults')
+
+    monkeypatch.setattr(payloads, 'request_body_env_vars', fail)
+    body = payloads.AutostopBody(cluster_name='cluster',
+                                idle_minutes=0,
+                                env_vars={constants.USER_ID_ENV_VAR: 'abcd1234'})
+    assert body.env_vars == {constants.USER_ID_ENV_VAR: 'abcd1234'}
+
+
+def test_request_body_missing_env_vars_uses_local_defaults(monkeypatch):
+    expected = {constants.USER_ID_ENV_VAR: 'abcd1234'}
+    monkeypatch.setattr(payloads, 'request_body_env_vars', lambda: expected)
+    body = payloads.AutostopBody(cluster_name='cluster', idle_minutes=0)
+    assert body.env_vars == expected
+
+
 def test_request_body_env_vars_includes_expected_keys(monkeypatch):
     monkeypatch.setattr(usage_lib.messages.usage, 'run_id', 'run-id')
 
